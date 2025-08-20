@@ -1,4 +1,4 @@
-// server.js — remote KB version
+1)// server.js — remote KB version
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -136,8 +136,8 @@ app.post("/api/faq-response", async (req, res) => {
     if (!query) return res.status(400).json({ error: "Missing 'query'." });
     if (!KB)   return res.status(503).json({ error: "KB not loaded yet" });
 
-    // 1) Intent fast path
-    const intent = matchIntent(query);
+   // 1) Intent -> use as context (do NOT return early)
+const intent = matchIntent(query);
 let intentSnippet = null;
 if (intent) {
   intentSnippet = {
@@ -147,28 +147,23 @@ if (intent) {
   };
 }
 
-    // 2) Retrieval
-    const retrieved = await retrieve(query, 5);
+// 2) Retrieval
+const retrieved = await retrieve(query, 5);
 
 // Build a context list (even if empty), and include the intent snippet if present
 const contextItems = [...retrieved.map(r => r.v.meta)];
 if (intentSnippet) contextItems.unshift(intentSnippet); // make it highest priority
 
-const contextBlock = contextItems.map((m, i) =>
-  `#${i+1} [${m.id || "kb"}] ${m.text} ${m.url ? `(URL: ${m.url})` : ""}`
-).join("\n\n");
+const contextBlock = contextItems
+  .map((m, i) => `#${i + 1} [${m.id || "kb"}] ${m.text}${m.url ? ` (URL: ${m.url})` : ""}`)
+  .join("\n\n");
 
-
-    const contextBlock = retrieved
-      .map((r, i) => `#${i+1} [${r.v.id}] ${r.v.meta.text} (URL: ${r.v.meta.url})`)
-      .join("\n\n");
-
-    const messages = [
+// 3) Ask the model every time (fluid answer; use context as guidance)
+const messages = [
   { role: "system", content: SYSTEM_PROMPT },
   {
     role: "user",
-    content:
-`User question: ${query}
+    content: `User question: ${query}
 
 Here are optional reference notes (use them if relevant; otherwise answer from general knowledge, but never invent specific prices/hours/policies):
 ${contextBlock || "(none)"}
@@ -180,20 +175,22 @@ When helpful, add 1–2 bullets and a clear CTA with the correct path/link.`
 const completion = await openai.chat.completions.create({
   model: "gpt-4o-mini",
   messages,
-  temperature: 0.5,           // a touch more fluid
-  presence_penalty: 0.2,      // encourages variety
+  temperature: 0.5,        // a touch more fluid
+  presence_penalty: 0.2,
   frequency_penalty: 0.2
 });
 
 
+
     const text = enforceGBP(completion.choices?.[0]?.message?.content?.trim()) ||
-                 "Sorry, I couldn’t find that in our info.";
+             "Sorry, I couldn’t find that in our info.";
 
-    const sources = retrieved.map(r => ({
-      id: r.v.id, url: r.v.meta.url, score: Number(r.score.toFixed(3))
-    }));
+const sources = contextItems.map((m, i) => ({
+  id: m.id || `kb_${i + 1}`,
+  url: m.url || null
+}));
 
-    res.json({ response: text, sources });
+res.json({ response: text, sources });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Server error" });
