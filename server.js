@@ -128,6 +128,7 @@ You are the Karting Central website assistant.
 - If a user mentions existing tickets or tracking codes, prefer the Customer Dashboard link from context.
 `;
 
+
 // ===== Routes =====
 app.post("/api/faq-response", async (req, res) => {
   try {
@@ -137,53 +138,53 @@ app.post("/api/faq-response", async (req, res) => {
 
     // 1) Intent fast path
     const intent = matchIntent(query);
-    if (intent) {
-      return res.json({
-        response: enforceGBP(intent.answer),
-        sources: [{ id: intent.intent, url: KB.site.urls.home, score: 1 }]
-      });
-    }
+let intentSnippet = null;
+if (intent) {
+  intentSnippet = {
+    id: `intent_${intent.intent}`,
+    text: intent.answer,
+    url: KB.site.urls.home
+  };
+}
 
     // 2) Retrieval
     const retrieved = await retrieve(query, 5);
-    const top = retrieved[0];
-    const RELEVANCE_MIN = 0.75;
 
-    if (!top || top.score < RELEVANCE_MIN) {
-      const fb = enforceGBP(
-        `I may need a bit more detail to help with that.
-- I can help with booking, opening hours, height limits, track details, or ticket tracking/gifting.
-- If you already have tickets, use the Customer Dashboard to view or gift them.
+// Build a context list (even if empty), and include the intent snippet if present
+const contextItems = [...retrieved.map(r => r.v.meta)];
+if (intentSnippet) contextItems.unshift(intentSnippet); // make it highest priority
 
-What would you like to do next?
-• Book now: ${KB.site.urls.book_experience}
-• Customer Dashboard: ${KB.site.urls.customer_dashboard}`
-      );
-      return res.json({ response: fb, sources: [] });
-    }
+const contextBlock = contextItems.map((m, i) =>
+  `#${i+1} [${m.id || "kb"}] ${m.text} ${m.url ? `(URL: ${m.url})` : ""}`
+).join("\n\n");
+
 
     const contextBlock = retrieved
       .map((r, i) => `#${i+1} [${r.v.id}] ${r.v.meta.text} (URL: ${r.v.meta.url})`)
       .join("\n\n");
 
     const messages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content:
-`Question: ${query}
+  { role: "system", content: SYSTEM_PROMPT },
+  {
+    role: "user",
+    content:
+`User question: ${query}
 
-Context:
-${contextBlock}
+Here are optional reference notes (use them if relevant; otherwise answer from general knowledge, but never invent specific prices/hours/policies):
+${contextBlock || "(none)"}
 
-Instructions:
-- Prefer quoting context.
-- If something is unclear or missing, ask a brief follow-up and suggest the closest next step (Book, Dashboard, Events).` }
-    ];
+When helpful, add 1–2 bullets and a clear CTA with the correct path/link.`
+  }
+];
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages,
-      temperature: 0.3
-    });
+const completion = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages,
+  temperature: 0.5,           // a touch more fluid
+  presence_penalty: 0.2,      // encourages variety
+  frequency_penalty: 0.2
+});
+
 
     const text = enforceGBP(completion.choices?.[0]?.message?.content?.trim()) ||
                  "Sorry, I couldn’t find that in our info.";
