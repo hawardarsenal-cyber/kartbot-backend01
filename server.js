@@ -7,10 +7,15 @@ import OpenAI from "openai";
 const app = express();
 app.use(express.json());
 app.use(cors({
-  origin: ["https://<YOUR_SITE_DOMAIN>", "http://localhost:3000"], // set your site
-  methods: ["POST","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"]
+  origin: [
+    "https://pos.kartingcentral.co.uk",
+    "https://www.kartingcentral.co.uk",
+    "http://localhost:3000"   // keep for local testing if you like
+  ],
+  methods: ["POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
+
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
