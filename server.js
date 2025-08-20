@@ -4,23 +4,34 @@ const dotenv = require('dotenv');
 const { OpenAI } = require('openai');
 
 dotenv.config();
-
 const app = express();
-const port = process.env.PORT || 3000;
 
-// ✅ Enable CORS
-app.use(cors({
-  origin: '*', // Or specify your frontend domain
-}));
-
+app.use(cors()); // ✅ Enables all CORS by default
 app.use(express.json());
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ... your endpoint handlers
+app.post('/api/faq-response', async (req, res) => {
+  const { query } = req.body;
 
-app.listen(port, () => {
-  console.log(`✅ API running on port ${port}`);
+  try {
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o', // ✅ Make sure you're using "gpt-4o"
+      messages: [
+        { role: 'system', content: 'You are a helpful karting assistant.' },
+        { role: 'user', content: query }
+      ],
+      temperature: 0.6,
+    });
+
+    res.json({ response: response.choices[0].message.content });
+  } catch (error) {
+    console.error('Error from OpenAI:', error.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`✅ Chatbot API running on port ${PORT}`));
