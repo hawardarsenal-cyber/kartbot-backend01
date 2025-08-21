@@ -49,8 +49,6 @@ function cosine(a, b) {
   return dot / ((Math.sqrt(na) * Math.sqrt(nb)) || 1);
 }
 
-
-
 // ---------- Flatten KB ----------
 function flattenDocsFromKB(kb) {
   const d = [];
@@ -170,10 +168,7 @@ Use them if helpful; otherwise answer generally. Never invent prices/hours/polic
       frequency_penalty: 0.2,
     });
 
-    const raw = completion.choices?.[0]?.message?.content?.trim() || "";
-let text = enforceGBP(raw);
-text = unwrapCodeFence(text);        // remove ```html fences if present
-text = injectSessionExplainer(text); // ensure clickable expander for “one full session”
+    const text = enforceGBP(completion.choices?.[0]?.message?.content?.trim()) || "Sorry, I couldn’t generate a reply.";
     const sources = retrieved.map(r => ({ id: r.v.id, url: r.v.meta.url }));
     res.json({ response: text, sources });
     console.log("[chat] done in", Date.now() - t0, "ms");
