@@ -49,43 +49,6 @@ function cosine(a, b) {
   return dot / ((Math.sqrt(na) * Math.sqrt(nb)) || 1);
 }
 
-function unwrapCodeFence(t) {
-  if (!t) return t;
-  const m = t.match(/^```(?:html)?\s*([\s\S]*?)\s*```$/i);
-  return m ? m[1].trim() : t;
-}
-
-function injectSessionExplainer(html) {
-  if (!html) return html;
-
-  // If the model already emitted a details block containing the phrase, do nothing.
-  const lower = html.toLowerCase();
-  if (lower.includes("<details") && lower.includes("one full session")) return html;
-
-  const explainer = `<details><summary><strong>one full session</strong></summary>
-A session is a timed run on track. All Karting Central tickets include the first session.
-<ul>
-  <li><strong>Activation</strong>: 2nd and 3rd sessions must be <strong>pre-booked</strong> at the time of booking the first session to activate and use Karting Central tickets and to secure multi-session discounts.</li>
-  <li><strong>Timing</strong>: 3 sessions typically secure ~1 hour on-site; using more than one ticket per person can extend to ~2 hours.</li>
-  <li><strong>Breaks</strong>: There’s a short break between sessions.</li>
-  <li><strong>On-site</strong>: Teas, coffees, snacks and drinks available.</li>
-</ul>
-Book: <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php">Book Experience</a> •
-Manage tickets: <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/custdash.php">Customer Dashboard</a>
-</details>`;
-
-  // Normalise common variants to a single token
-  const variants = [
-    /\*\*one full session\*\*/gi, /\*\*1 full session\*\*/gi,
-    /<strong>\s*one full session\s*<\/strong>/gi, /<strong>\s*1 full session\s*<\/strong>/gi,
-    /\bone full session\b/gi, /\b1 full session\b/gi,
-  ];
-  let out = html;
-  for (const p of variants) out = out.replace(p, "<strong>one full session</strong>");
-
-  // Replace the first occurrence with the details expander
-  return out.replace(/<strong>one full session<\/strong>/i, explainer);
-}
 
 
 // ---------- Flatten KB ----------
