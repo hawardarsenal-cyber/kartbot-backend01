@@ -14,24 +14,39 @@
     "extras": { "f1_simulator": true }
   },
   {
-    "id": "mile_end",
-    "name": "Mile End",
-    "region": "London",
-    "type": "outdoor",
-    "indoor": false,
-    "headline": "Outdoor electric karting in Mile End, London.",
-    "karts": { "type": "electric (custom build)", "top_speed_mph": 50 },
-    "requirements": { "min_height_cm": 155 },
-    "ticket_days_allowed": ["Monday", "Tuesday", "Wednesday", "Sunday"],
-    "must_prebook": true,
-    "open_until": "22:00",
-    "features": [
-      "floodlights for evening racing",
-      "free rain suits if raining",
-      "food can be brought in or delivered",
-      "indoor and outdoor seating"
-    ]
-  }
+  "id": "mile_end",
+  "name": "Mile End",
+  "region": "London",
+  "type": "outdoor",
+  "indoor": false,
+  "headline": "Outdoor electric karting in Mile End, London.",
+  "track": {
+    "length_m": 450,
+    "floodlit": true,
+    "open_until": "22:00"
+  },
+  "karts": {
+    "type": "electric (custom build)",
+    "top_speed_mph": 50
+  },
+  "sessions": {
+    "laps_per_session": 8,
+    "three_sessions_total_laps": 24,
+    "approx_track_time_minutes": 30,
+    "three_sessions_booking_window_minutes": 60
+  },
+  "requirements": {
+    "min_height_cm": 155
+  },
+  "ticket_days_allowed": ["Monday", "Tuesday", "Wednesday", "Sunday"],
+  "must_prebook": true,
+  "features": [
+    "racing under floodlights in the evenings",
+    "free rain suits if raining",
+    "food can be brought in or delivered",
+    "indoor and outdoor seating"
+  ]
+}
 ],
     "brand": "Karting Central",
     "primary_location": {
@@ -222,4 +237,5 @@
     }
   ]
 }
+
 
