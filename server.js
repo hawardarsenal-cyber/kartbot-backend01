@@ -6,6 +6,7 @@ import OpenAI from "openai";
 import fs from "fs/promises";
 import { existsSync, mkdirSync } from "fs";
 import path from "path";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -16,7 +17,7 @@ app.use(
       "https://www.kartingcentral.co.uk",
       "http://localhost:3000",
     ],
-    methods: ["POST", "OPTIONS"],
+    methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
@@ -153,7 +154,7 @@ async function retrieve(query, k = 5) {
 // ---------- KB fetchers ----------
 async function fetchKB(force = false) {
   if (!KB_URL) throw new Error("KB_URL not set");
-  const headers = {};
+  const headers = { "Cache-Control": "no-cache", "Pragma": "no-cache" };
   if (!force) {
     if (etag) headers["If-None-Match"] = etag;
     if (lastModified) headers["If-Modified-Since"] = lastModified;
@@ -172,7 +173,7 @@ async function fetchKB(force = false) {
 
 async function fetchPrompt(force = false) {
   if (!PROMPT_URL) return false;
-  const headers = {};
+  const headers = { "Cache-Control": "no-cache", "Pragma": "no-cache" };
   if (!force) {
     if (promptEtag) headers["If-None-Match"] = promptEtag;
     if (promptLastMod) headers["If-Modified-Since"] = promptLastMod;
@@ -326,10 +327,13 @@ Use them if helpful; otherwise answer generally. Never invent prices/hours/polic
 });
 
 // ---------- Status & reload ----------
-app.get("/healthz", (_, res) => res.send("ok"));
+app.get("/healthz", (_req, res) => {
+  res.json({ ok: true, ts: Date.now() });
+});
 app.get("/kb-status", (_, res) => res.json({ loaded: !!KB, chunks: VECTORS.length }));
-app.get("/prompt-status", (_, res) => res.json({ hasPrompt: !!PROMPT_TEXT }));
-
+app.get("/prompt-status", (_req, res) => {
+  res.json({ hasPrompt: !!(PROMPT_TEXT && PROMPT_TEXT.trim()) });
+});
 app.post("/kb-reload", async (_req, res) => {
   try {
     const changed = await fetchKB(true);
@@ -349,7 +353,6 @@ app.post("/prompt-reload", async (_req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
-import crypto from "crypto";
 
 function sha1(s="") {
   return crypto.createHash("sha1").update(String(s)).digest("hex").slice(0, 10);
@@ -371,25 +374,56 @@ app.get("/debug-config", (_req, res) => {
   });
 });
 
+async function warmup() {
+  try {
+    await fetchPrompt(true);
+  } catch (e) {
+    console.warn("[warmup] prompt:", e.message);
+  }
+
+  try {
+    await fetchKB(true); // includes rebuildEmbeddings()
+  } catch (e) {
+    console.warn("[warmup] kb:", e.message);
+  }
+
+  // Warm OpenAI routes so first real user prompt is fast
+  await warmOpenAI();
+}
+
+async function warmOpenAI() {
+  try {
+    // Warm embeddings endpoint
+    await openai.embeddings.create({
+      model: EMB_MODEL,
+      input: "warmup",
+    });
+  } catch (e) {
+    console.warn("[warmup] embeddings:", e.message);
+  }
+
+  try {
+    // Warm chat endpoint
+    await openai.chat.completions.create({
+      model: CHAT_MODEL,
+      messages: [{ role: "system", content: "warmup" }, { role: "user", content: "ping" }],
+      max_tokens: 8,
+      temperature: 0,
+    });
+  } catch (e) {
+    console.warn("[warmup] chat:", e.message);
+  }
+}
+
+
+
 // ---------- Boot ----------
 const port = process.env.PORT || 10000;
 app.listen(port, async () => {
   console.log(`Listening on ${port}`);
 
-  const tryInit = async () => {
-    try {
-      await fetchKB(true);
-    } catch (e) {
-      console.error("Initial KB load failed:", e.message);
-    }
-    try {
-      await fetchPrompt(true);
-    } catch (e) {
-      console.error("Initial prompt load failed:", e.message);
-    }
-  };
 
-  await tryInit();
+    await warmup();
 
   setInterval(
     () =>
@@ -405,4 +439,8 @@ app.listen(port, async () => {
       ),
     REFRESH_MS
   );
+    // Self-ping to keep the service hot (still use external ping for Render sleep)
+  setInterval(() => {
+    fetch(`http://127.0.0.1:${port}/healthz`).catch(() => {});
+  }, 60 * 1000);
 });
