@@ -1,5 +1,38 @@
 {
   "site": {
+    "tracks": [
+  {
+    "id": "gillingham",
+    "name": "Gillingham",
+    "region": "Kent",
+    "type": "indoor",
+    "indoor": true,
+    "postcode_area": "ME",
+    "headline": "Indoor electric karting in Gillingham, Kent.",
+    "karts": { "type": "electric", "top_speed_mph": 40, "max_on_track": 10 },
+    "requirements": { "min_height_cm": 152 },
+    "extras": { "f1_simulator": true }
+  },
+  {
+    "id": "mile_end",
+    "name": "Mile End",
+    "region": "London",
+    "type": "outdoor",
+    "indoor": false,
+    "headline": "Outdoor electric karting in Mile End, London.",
+    "karts": { "type": "electric (custom build)", "top_speed_mph": 50 },
+    "requirements": { "min_height_cm": 155 },
+    "ticket_days_allowed": ["Monday", "Tuesday", "Wednesday", "Sunday"],
+    "must_prebook": true,
+    "open_until": "22:00",
+    "features": [
+      "floodlights for evening racing",
+      "free rain suits if raining",
+      "food can be brought in or delivered",
+      "indoor and outdoor seating"
+    ]
+  }
+],
     "brand": "Karting Central",
     "primary_location": {
       "name": "Gillingham",
@@ -189,3 +222,4 @@
     }
   ]
 }
+
