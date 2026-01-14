@@ -1,3 +1,14 @@
+app.get("/api/debug/prompt", (req, res) => {
+  res.json({
+    ok: true,
+    PROMPT_URL: process.env.PROMPT_URL || null,
+    KB_URL: process.env.KB_URL || null,
+    promptLastLoadedAt: global.promptLastLoadedAt || null,
+    kbLastLoadedAt: global.kbLastLoadedAt || null,
+    promptETag: global.promptETag || null,
+    kbETag: global.kbETag || null,
+  });
+});
 // server.js — GPT + remote KB with external instructions + promo leads
 import "dotenv/config";
 import express from "express";
