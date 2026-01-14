@@ -89,35 +89,49 @@ function flattenDocsFromKB(kb) {
     // Per-track chunks (facts + rules)
     for (const t of tracks) {
       const karts = t.karts || {};
-      const req = t.requirements || {};
-      const days = Array.isArray(t.ticket_days_allowed) ? t.ticket_days_allowed.join(", ") : null;
-      const feats = Array.isArray(t.features) ? t.features.join("; ") : null;
+const req = t.requirements || {};
+const trk = t.track || {};
+const sess = t.sessions || {};
+const days = Array.isArray(t.ticket_days_allowed) ? t.ticket_days_allowed.join(", ") : null;
+const feats = Array.isArray(t.features) ? t.features.join("; ") : null;
 
-      d.push({
-        id: `track_${t.id}`,
-        text:
-          `${t.name} (${t.region}) — ${t.indoor ? "indoor" : "outdoor"} track. ` +
-          (karts.type ? `Karts: ${karts.type}. ` : "") +
-          (karts.top_speed_mph ? `Top speed up to ${karts.top_speed_mph} mph. ` : "") +
-          (karts.max_on_track ? `Max ${karts.max_on_track} karts on track. ` : "") +
-          (req.min_height_cm ? `Minimum height ${req.min_height_cm} cm. ` : "") +
-          (t.must_prebook ? `Must pre-book. ` : "") +
-          (days ? `Karting Central tickets valid on: ${days}. ` : "") +
-          (t.open_until ? `Open until ${t.open_until}. ` : "") +
-          (feats ? `Features: ${feats}.` : ""),
-        url: kb.site?.urls?.home,
-      });
+d.push({
+  id: `track_${t.id}`,
+  text:
+    `${t.name} (${t.region}) — ${t.indoor ? "indoor" : "outdoor"} track. ` +
+    (trk.length_m ? `Track length ${trk.length_m} m. ` : "") +
+    (trk.floodlit ? `Floodlit for evening racing. ` : "") +
+    (trk.open_until ? `Open until ${trk.open_until}. ` : "") +
+    (karts.type ? `Karts: ${karts.type}. ` : "") +
+    (karts.top_speed_mph ? `Top speed up to ${karts.top_speed_mph} mph. ` : "") +
+    (karts.max_on_track ? `Max ${karts.max_on_track} karts on track. ` : "") +
+    (sess.laps_per_session ? `Each session is ${sess.laps_per_session} laps. ` : "") +
+    (sess.three_sessions_total_laps ? `3 sessions = ${sess.three_sessions_total_laps} laps total. ` : "") +
+    (req.min_height_cm ? `Minimum height ${req.min_height_cm} cm. ` : "") +
+    (t.must_prebook ? `Must pre-book. ` : "") +
+    (days ? `Karting Central tickets valid on: ${days}. ` : "") +
+    (feats ? `Features: ${feats}.` : ""),
+  url: kb.site?.urls?.home,
+});
 
       // Track-specific eligibility rule chunk (helps retrieval on “can I use tickets at Mile End?”)
       if (t.id === "mile_end") {
-        d.push({
-          id: "mile_end_ticket_rules",
-          text:
-            `Mile End (London) ticket rules: minimum height 155 cm. ` +
-            `Karting Central tickets can be used on Monday, Tuesday, Wednesday, and Sunday only, and must be pre-booked.`,
-          url: kb.site?.urls?.book_experience || kb.site?.urls?.home,
-        });
-      }
+  d.push({
+    id: "mile_end_ticket_rules",
+    text:
+      `Mile End (London) ticket rules: minimum height 155 cm. ` +
+      `Karting Central tickets can be used on Monday, Tuesday, Wednesday, and Sunday only, and must be pre-booked.`,
+    url: kb.site?.urls?.book_experience || kb.site?.urls?.home,
+  });
+
+  d.push({
+    id: "mile_end_sessions",
+    text:
+      `Mile End sessions: 1 session is always 8 laps on a 450 m floodlit outdoor track. ` +
+      `3 sessions = 24 laps total; an hour booking window with roughly 30 minutes of track time.`,
+    url: kb.site?.urls?.book_experience || kb.site?.urls?.home,
+  });
+}
 
       if (t.id === "gillingham" && t.extras?.f1_simulator) {
         d.push({
