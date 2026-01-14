@@ -62,69 +62,140 @@ function cosine(a, b) {
 
 function flattenDocsFromKB(kb) {
   const d = [];
+
+  // General / site
   d.push({
     id: "opening",
-    text: `${kb.opening.days} Hours: ${kb.opening.hours}`,
-    url: kb.site.urls.home,
+    text: `${kb.opening?.days || ""} Hours: ${kb.opening?.hours || ""}`.trim(),
+    url: kb.site?.urls?.home,
   });
-  d.push({
-    id: "track",
-    text: `Indoor: ${kb.track_and_karts.indoor}. Kart: ${kb.track_and_karts.kart_type}. Top speed up to ${kb.track_and_karts.top_speed_mph} mph. Max ${kb.track_and_karts.max_karts_on_track} karts.`,
-    url: kb.site.urls.home,
-  });
-  d.push({
-    id: "requirements",
-    text: `Adult min height: ${kb.requirements.adult_min_height_cm} cm (5ft). Junior min height: ${kb.requirements.junior_min_height_cm} cm. Shoes count toward height: ${
-      kb.requirements.shoes_count_towards_height ? "yes" : "no"
-    }.`,
-    url: kb.site.urls.safety,
-  });
-  d.push({
-    id: "equipment",
-    text: `Included: ${kb.equipment.included.join(", ")}.`,
-    url: kb.site.urls.safety,
-  });
-  d.push({
-    id: "sessions",
-    text: `Per ticket: ${kb.sessions.per_ticket_includes}. Up to ${kb.sessions.laps_per_session_up_to} laps/session.`,
-    url: kb.site.urls.book_tickets,
-  });
-  if (kb.sessions?.duration_guidance) {
+
+  // ---------- Multi-track support ----------
+  const tracks = kb.site?.tracks && Array.isArray(kb.site.tracks) ? kb.site.tracks : [];
+
+  if (tracks.length) {
+    // A high-signal overview chunk that should win retrieval for: "where are your tracks?"
     d.push({
-      id: "duration",
-      text: `Duration guide: 1 ticket ≈ ~1 hour; 2 tickets ≈ ~2 hours on-site.`,
-      url: kb.site.urls.book_tickets,
+      id: "tracks_overview",
+      text:
+        `Karting Central tracks: ` +
+        tracks
+          .map(t => `${t.name} (${t.region}) — ${t.type}${t.indoor ? " indoor" : " outdoor"}`)
+          .join("; ") +
+        `. Ask “Which track?” if the user is unsure.`,
+      url: kb.site?.urls?.home,
+    });
+
+    // Per-track chunks (facts + rules)
+    for (const t of tracks) {
+      const karts = t.karts || {};
+      const req = t.requirements || {};
+      const days = Array.isArray(t.ticket_days_allowed) ? t.ticket_days_allowed.join(", ") : null;
+      const feats = Array.isArray(t.features) ? t.features.join("; ") : null;
+
+      d.push({
+        id: `track_${t.id}`,
+        text:
+          `${t.name} (${t.region}) — ${t.indoor ? "indoor" : "outdoor"} track. ` +
+          (karts.type ? `Karts: ${karts.type}. ` : "") +
+          (karts.top_speed_mph ? `Top speed up to ${karts.top_speed_mph} mph. ` : "") +
+          (karts.max_on_track ? `Max ${karts.max_on_track} karts on track. ` : "") +
+          (req.min_height_cm ? `Minimum height ${req.min_height_cm} cm. ` : "") +
+          (t.must_prebook ? `Must pre-book. ` : "") +
+          (days ? `Karting Central tickets valid on: ${days}. ` : "") +
+          (t.open_until ? `Open until ${t.open_until}. ` : "") +
+          (feats ? `Features: ${feats}.` : ""),
+        url: kb.site?.urls?.home,
+      });
+
+      // Track-specific eligibility rule chunk (helps retrieval on “can I use tickets at Mile End?”)
+      if (t.id === "mile_end") {
+        d.push({
+          id: "mile_end_ticket_rules",
+          text:
+            `Mile End (London) ticket rules: minimum height 155 cm. ` +
+            `Karting Central tickets can be used on Monday, Tuesday, Wednesday, and Sunday only, and must be pre-booked.`,
+          url: kb.site?.urls?.book_experience || kb.site?.urls?.home,
+        });
+      }
+
+      if (t.id === "gillingham" && t.extras?.f1_simulator) {
+        d.push({
+          id: "gillingham_f1_sim",
+          text:
+            `Gillingham has an F1 simulator. With Karting Central tickets it is 50% off at £5 per simulator session; simulator sessions are 10 minutes.`,
+          url: kb.site?.urls?.home,
+        });
+      }
+    }
+  } else {
+    // Backwards compatible single-track chunks (your current schema)
+    if (kb.track_and_karts) {
+      d.push({
+        id: "track",
+        text: `Indoor: ${kb.track_and_karts.indoor}. Kart: ${kb.track_and_karts.kart_type}. Top speed up to ${kb.track_and_karts.top_speed_mph} mph. Max ${kb.track_and_karts.max_karts_on_track} karts.`,
+        url: kb.site?.urls?.home,
+      });
+    }
+    if (kb.requirements) {
+      d.push({
+        id: "requirements",
+        text: `Adult min height: ${kb.requirements.adult_min_height_cm} cm (5ft). Junior min height: ${kb.requirements.junior_min_height_cm} cm. Shoes count toward height: ${
+          kb.requirements.shoes_count_towards_height ? "yes" : "no"
+        }.`,
+        url: kb.site?.urls?.safety,
+      });
+    }
+  }
+
+  // Equipment
+  if (kb.equipment?.included?.length) {
+    d.push({
+      id: "equipment",
+      text: `Included: ${kb.equipment.included.join(", ")}.`,
+      url: kb.site?.urls?.safety,
     });
   }
+
+  // Sessions / deals (keep your existing)
+  if (kb.sessions) {
+    d.push({
+      id: "sessions",
+      text: `Per ticket: ${kb.sessions.per_ticket_includes}. Up to ${kb.sessions.laps_per_session_up_to} laps/session.`,
+      url: kb.site?.urls?.book_tickets,
+    });
+  }
+
   d.push({
     id: "deals",
     text: `Session 2 & 3 discounted (pre-book by phone). Session 3 tiers: 1–4 £12; 5–8 £11; 9–12 £10.`,
-    url: kb.site.urls.book_tickets,
+    url: kb.site?.urls?.book_tickets,
   });
+
   d.push({
     id: "promos",
     text: `Promotions do not apply on Saturdays.`,
-    url: kb.site.urls.terms,
+    url: kb.site?.urls?.terms,
   });
-  d.push({
-    id: "f1",
-    text: `F1 simulator at Gillingham. 50% off with Karting Central tickets.`,
-    url: kb.site.urls.home,
-  });
+
   d.push({
     id: "tracking",
     text: `Tracking codes for managing tickets. Gifting available via Customer Dashboard.`,
-    url: kb.site.urls.customer_dashboard,
+    url: kb.site?.urls?.customer_dashboard,
   });
+
+  // Fast answers as hint chunks (unchanged)
   for (const f of kb.fast_answers || []) {
     d.push({
       id: `hint_${f.intent}`,
       text: `Hint: ${f.answer}`,
-      url: kb.site.urls.home,
+      url: kb.site?.urls?.home,
     });
   }
+
   return d;
 }
+
 
 async function rebuildEmbeddings() {
   if (!KB) return;
