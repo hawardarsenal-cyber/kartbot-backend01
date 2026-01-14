@@ -349,6 +349,27 @@ app.post("/prompt-reload", async (_req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+import crypto from "crypto";
+
+function sha1(s="") {
+  return crypto.createHash("sha1").update(String(s)).digest("hex").slice(0, 10);
+}
+
+app.get("/debug-config", (_req, res) => {
+  res.json({
+    ok: true,
+    KB_URL: process.env.KB_URL || null,
+    PROMPT_URL: process.env.PROMPT_URL || null,
+    promptHash: sha1(PROMPT_TEXT || ""),
+    promptPreview: (PROMPT_TEXT || "").slice(0, 220),
+    kbLoaded: !!KB,
+    kbChunks: VECTORS.length,
+    kbEtag: etag,
+    kbLastModified: lastModified,
+    promptEtag,
+    promptLastMod,
+  });
+});
 
 // ---------- Boot ----------
 const port = process.env.PORT || 10000;
