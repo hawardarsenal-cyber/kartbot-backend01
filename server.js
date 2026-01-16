@@ -110,6 +110,33 @@ function upsertSess(id) {
   s.updatedAt = Date.now();
   return s;
 }
+function buildFactsForValidator(kb) {
+  const tracks = kb?.site?.tracks || [];
+  const urls = kb?.site?.urls || {};
+
+  const trackLines = tracks.map(t => {
+    const days = Array.isArray(t.ticket_days_allowed) ? t.ticket_days_allowed.join(", ") : "";
+    const laps = t.sessions?.laps_per_session || "";
+    const len  = t.track?.length_m || "";
+    const floodlit = t.track?.floodlit ? "yes" : "no";
+    const openUntil = t.track?.open_until || "";
+    return `- ${t.name} (${t.region}): ${t.indoor ? "indoor" : "outdoor"}, min height ${t.requirements?.min_height_cm || "?"}cm, laps/session ${laps || "?"}, track length ${len || "?"}m, floodlit ${floodlit}, open until ${openUntil || "?"}, ticket days allowed: ${days || "n/a"}, must prebook: ${t.must_prebook ? "yes" : "no"}`;
+  }).join("\n");
+
+  return `
+KEY FACTS (validator):
+Tracks:
+${trackLines}
+
+Core rules:
+- If Mile End: session is ALWAYS 8 laps; track length 450m; floodlit; open until 22:00; min height 155cm; tickets valid Mon/Tue/Wed/Sun; must pre-book.
+- If Gillingham: indoor; electric; up to ~40mph; F1 simulator available; sim sessions are 10 minutes; £5 (50% off) with tickets.
+- Customer Dashboard (full): https://pos.kartingcentral.co.uk/home/download/pos2/pos2/cdashlogin.php
+- Ticket Checker (simple): https://pos.kartingcentral.co.uk/home/download/pos2/pos2/custdash.php
+- Book Experience: ${urls.book_experience || "https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php"}
+`.trim();
+}
+
 
 function pushTurn(sess, role, content) {
   if (!sess) return;
@@ -551,23 +578,38 @@ app.post("/api/faq-response", async (req, res) => {
       content: t.content,
     }));
 
-    const messages = [
-      { role: "system", content: getSystemPrompt() }, // .md is the prompt
-      ...historyMsgs,
-      {
-        role: "user",
-        content: `User question: ${query}
+    const facts = buildFactsForValidator(KB); // new function (below)
 
-Reference notes (optional factual snippets):
+const messages = [
+  {
+    role: "system",
+    content: `
+${getSystemPrompt()}
+
+You must treat the above instructions as the SOURCE OF TRUTH.
+If any reference notes conflict with the system instructions, ignore the notes.
+
+Output must be valid HTML only.
+`.trim(),
+  },
+  {
+    role: "user",
+    content: `User question: ${query}
+
+Reference notes (secondary, may be incomplete):
 ${contextBlock || "(none)"}
 
-Rules:
-- Continue the conversation using prior messages (do not treat each message as new).
-- Do NOT repeatedly ask for track/day/time unless eligibility/booking requires it.
-- If user asks where/locations/tracks, list BOTH: Gillingham (Kent) and Mile End (London).
-- Output valid HTML only. Use <a> links. Do not output Markdown. Do not invent policies/prices/hours.`,
-      },
-    ];
+FAQ double-check facts (use ONLY to correct contradictions):
+${facts}
+
+Task:
+1) Answer the user using the system instructions first.
+2) If your answer conflicts with the FAQ facts, correct it.
+3) If user did not specify track/day and it matters, ask ONE short question only.
+`.trim(),
+  },
+];
+
 
     const completion = await openai.chat.completions.create({
       model: CHAT_MODEL,
