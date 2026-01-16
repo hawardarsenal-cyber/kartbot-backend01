@@ -141,10 +141,10 @@
       "answer": "💸 No worries! You can buy new tickets here: [Book Tickets](https://www.kartingcentral.co.uk/gokarting--ticket-bookings)"
     },
     {
-      "intent": "track_location",
-      "keywords": ["where","track location","postcode","where are you","gillingham","venue address","location of track"],
-      "answer": "📍 Our track is located in **Gillingham, Kent** — ready when you are!"
-    },
+  "intent": "track_location",
+  "keywords": ["where","track location","postcode","where are you","tracks","locations","venues","gillingham","mile end","london","venue address","location of track"],
+  "answer": "📍 We currently run tracks in <strong>Gillingham (Kent)</strong> and <strong>Mile End (London)</strong>.<br>Which one are you looking at (and what day)?"
+},
     {
       "intent": "opening_days",
       "keywords": ["open","opening days","week","when are you open","days open","weekly schedule","availability"],
@@ -237,5 +237,6 @@
     }
   ]
 }
+
 
 
