@@ -59,6 +59,26 @@ function cosine(a, b) {
   const denom = (Math.sqrt(na) * Math.sqrt(nb)) || 1;
   return dot / denom;
 }
+function looksLikeTrackOverviewQuery(q = "") {
+  const s = String(q).toLowerCase();
+  return (
+    (s.includes("where") && (s.includes("track") || s.includes("tracks") || s.includes("located") || s.includes("location"))) ||
+    s.includes("what tracks") ||
+    s.includes("which tracks") ||
+    s.includes("locations") ||
+    s.includes("venues")
+  );
+}
+
+function buildTracksOverview(kb) {
+  const tracks = kb?.site?.tracks;
+  if (!Array.isArray(tracks) || !tracks.length) return "";
+  const line = tracks
+    .map(t => `${t.name} (${t.region}) — ${t.indoor ? "indoor" : "outdoor"}`)
+    .join("; ");
+  return `Tracks overview: ${line}. If the user doesn’t specify a track/day, ask which track + what day/time.`;
+}
+
 
 function flattenDocsFromKB(kb) {
   const d = [];
