@@ -46,7 +46,7 @@ let promptEtag = null,
 const enforceGBP = (t) => (t || "").replace(/\$/g, "£");
 
 // ---------- Fast routes (keyword intents) ----------
-function norm(s = "") {
+function normQ(s = "") {
   return String(s).toLowerCase().trim();
 }
 
@@ -58,39 +58,35 @@ function buildTracksHtml(kb) {
   const tracks = kb?.site?.tracks || [];
   if (!tracks.length) return null;
 
-  // Keep it short + ask which track
   const names = tracks.map(t => `${t.name} (${t.region})`).join(" and ");
   return `We currently run tracks in <strong>${names}</strong>.<br>Which one are you looking at (and what day)?`;
 }
 
 function fastRouteReply(query, kb) {
-  const q = norm(query);
+  const q = normQ(query);
   if (!kb) return null;
 
-  // “Where are your tracks / where is the track / locations”
   if (
     hasAny(q, ["where", "location", "located", "postcode", "address", "tracks", "venues"]) &&
-    !hasAny(q, ["my tracking", "ticket", "pin", "dashboard"]) // avoid clashes
+    !hasAny(q, ["ticket", "tracking", "dashboard"])
   ) {
     const tracksHtml = buildTracksHtml(kb);
     if (tracksHtml) return tracksHtml;
   }
 
-  // Mile End direct
   if (hasAny(q, ["mile end", "london"])) {
-    return `Mile End is our <strong>London</strong> outdoor electric track.<br>` +
-      `• Minimum height: <strong>155 cm</strong><br>` +
-      `• Tickets valid: <strong>Mon / Tue / Wed / Sun</strong> (pre-book required)<br>` +
-      `• <strong>8 laps</strong> per session on a <strong>450 m</strong> floodlit track (open until <strong>22:00</strong>)<br>` +
-      `Book here: <a href="${kb.site?.urls?.book_experience}">Book Experience</a>`;
+    return `Mile End is our <strong>London</strong> outdoor electric track.<br>
+    • <strong>8 laps</strong> per session on a <strong>450 m</strong> floodlit track<br>
+    • Minimum height: <strong>155 cm</strong><br>
+    • Tickets valid: <strong>Mon / Tue / Wed / Sun</strong> (pre-book required)<br>
+    <a href="${kb.site?.urls?.book_experience}">Book Experience</a>`;
   }
 
-  // Customer Dashboard vs Ticket Checker routing
-  if (hasAny(q, ["dashboard", "pin", "referral", "credits", "gift", "gifting", "redeemed", "tickets left"])) {
-    return `You can manage tickets, gifting and referrals in the ` +
-      `<a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/cdashlogin.php">Customer Dashboard</a>.<br>` +
-      `If you only need a quick check, use the ` +
-      `<a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/custdash.php">Ticket Checker</a>.`;
+  if (hasAny(q, ["dashboard", "pin", "gift", "referral", "credits", "tickets left", "redeemed"])) {
+    return `Manage tickets, gifting and referrals in the 
+    <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/cdashlogin.php">Customer Dashboard</a>.<br>
+    For a quick check only, use the 
+    <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/custdash.php">Ticket Checker</a>.`;
   }
 
   return null;
