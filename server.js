@@ -45,6 +45,33 @@ let promptEtag = null,
 // ---------- Utils ----------
 const enforceGBP = (t) => (t || "").replace(/\$/g, "£");
 
+function norm(s="") {
+  return String(s || "").trim().toLowerCase();
+}
+function hasAny(q, arr) {
+  const s = norm(q);
+  return arr.some(k => s.includes(k));
+}
+function escHtml(s="") {
+  return String(s || "")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+function tracksFromKB() {
+  const tracks = KB?.site?.tracks;
+  return Array.isArray(tracks) ? tracks : [];
+}
+function renderTracksOverviewHTML() {
+  const tracks = tracksFromKB();
+  if (!tracks.length) return "";
+  const lines = tracks.map(t => {
+    const io = t.indoor ? "Indoor" : "Outdoor";
+    return `<li><strong>${escHtml(t.name)}</strong> (${escHtml(t.region)}) — ${io} ${escHtml(t.type || "karting")}</li>`;
+  }).join("");
+  return `We currently have these tracks:<br><ul>${lines}</ul>Which track are you looking at?`;
+}
+
+
 function cosine(a, b) {
   let dot = 0,
     na = 0,
