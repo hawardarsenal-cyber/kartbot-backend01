@@ -1,4 +1,6 @@
-// server.js — GPT + remote KB with external instructions + promo leads
+// server.js — GPT + remote KB (JSON) + external instructions (.md) + promo leads
+// Adds: conversation memory + slot logic (track/day) + fast-routes that never default to Gillingham for "where is the track"
+
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -10,6 +12,7 @@ import crypto from "crypto";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+
 app.use(
   cors({
     origin: [
@@ -24,8 +27,8 @@ app.use(
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const CHAT_MODEL = "gpt-4o-mini";
-const EMB_MODEL = "text-embedding-3-small";
+const CHAT_MODEL = process.env.CHAT_MODEL || "gpt-4o-mini";
+const EMB_MODEL = process.env.EMB_MODEL || "text-embedding-3-small";
 
 // ---------- Remote KB ----------
 const KB_URL = process.env.KB_URL;
@@ -45,92 +48,8 @@ let promptEtag = null,
 // ---------- Utils ----------
 const enforceGBP = (t) => (t || "").replace(/\$/g, "£");
 
-// ---------- Deterministic router (NO duplicates) ----------
-function qNorm(s = "") {
-  return String(s).toLowerCase().trim();
-}
-function qHas(q, words = []) {
-  return words.some((w) => q.includes(w));
-}
-
-function detectTrack(query = "") {
-  const q = qNorm(query);
-
-  const isMileEnd = qHas(q, ["mile end", "mileend", "london"]);
-  const isGillingham = qHas(q, ["gillingham", "kent"]);
-
-  if (isMileEnd && !isGillingham) return "mile_end";
-  if (isGillingham && !isMileEnd) return "gillingham";
-
-  // Never default to Gillingham for generic location queries
-  if (qHas(q, ["where", "location", "located", "address", "postcode", "tracks", "venues"])) {
-    return "all";
-  }
-
-  return "unknown";
-}
-
-function trackHeader(trackId, kb) {
-  const tracks = Array.isArray(kb?.site?.tracks) ? kb.site.tracks : [];
-  const list = tracks.map((x) => `${x.name} (${x.region})`).join(" and ");
-
-  if (trackId === "all") {
-    return `Track context: user asked generally. We currently run: ${list}. Ask which track + what day/time if needed.`;
-  }
-  if (trackId === "unknown") {
-    return `Track context: user did not specify a track. We run: ${list}. Ask ONE question: “Which track and what day/time?”`;
-  }
-
-  const t = tracks.find((x) => x.id === trackId);
-  if (!t) return `Track context: ${trackId}`;
-
-  const io = t.indoor ? "indoor" : "outdoor";
-  const laps = t.sessions?.laps_per_session ? `${t.sessions.laps_per_session} laps per session` : "";
-  const len = t.track?.length_m ? `${t.track.length_m} m track` : "";
-  const flood = t.track?.floodlit ? "floodlit" : "";
-  const open = t.track?.open_until ? `open until ${t.track.open_until}` : "";
-  const speed = t.karts?.top_speed_mph ? `up to ${t.karts.top_speed_mph} mph` : "";
-  const height = t.requirements?.min_height_cm ? `min height ${t.requirements.min_height_cm} cm` : "";
-  const days = Array.isArray(t.ticket_days_allowed) ? `tickets valid on ${t.ticket_days_allowed.join(", ")}` : "";
-  const prebook = t.must_prebook ? "pre-book required" : "";
-
-  return `Track context: ${t.name} (${t.region}) — ${io}. ${[len, flood, open, laps, speed, height, days, prebook]
-    .filter(Boolean)
-    .join(", ")}.`;
-}
-
-// ---------- FAST replies (strict, small set) ----------
-function fastRouteReply(query, kb) {
-  const q = qNorm(query);
-  if (!kb) return null;
-
-  // Any generic “where/location/tracks” → ALWAYS list both tracks
-  if (qHas(q, ["where", "location", "located", "address", "postcode", "tracks", "venues"])) {
-    const tracks = Array.isArray(kb?.site?.tracks) ? kb.site.tracks : [];
-    if (!tracks.length) return null;
-    const names = tracks.map((t) => `${t.name} (${t.region})`).join(" and ");
-    return `We currently run tracks in <strong>${names}</strong>.<br>Which one are you looking at (and what day/time)?`;
-  }
-
-  // Mile End direct
-  if (qHas(q, ["mile end", "mileend", "london"])) {
-    return `Mile End is our <strong>London</strong> outdoor electric track.<br>
-• <strong>8 laps</strong> per session on a <strong>450 m</strong> floodlit track<br>
-• Minimum height: <strong>155 cm</strong><br>
-• Tickets valid: <strong>Mon / Tue / Wed / Sun</strong> (pre-book required)<br>
-<a href="${kb?.site?.urls?.book_experience || "https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php"}">Book Experience</a>`;
-  }
-
-  // Dashboard / PIN / gifting / referrals
-  if (qHas(q, ["dashboard", "pin", "gift", "gifting", "referral", "credits", "tickets left", "redeemed", "sell", "share"])) {
-    return `Manage tickets, gifting and referrals in the 
-<a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/cdashlogin.php">Customer Dashboard</a>.<br>
-If you don’t have a PIN, you can request one on the Customer Dashboard login page.<br>
-For a quick check only, use the 
-<a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/custdash.php">Ticket Checker</a>.`;
-  }
-
-  return null;
+function sha1(s = "") {
+  return crypto.createHash("sha1").update(String(s)).digest("hex").slice(0, 10);
 }
 
 function cosine(a, b) {
@@ -148,32 +67,188 @@ function cosine(a, b) {
   return dot / denom;
 }
 
-// ---------- KB -> embedding docs ----------
+function normQ(s = "") {
+  return String(s || "").toLowerCase().trim();
+}
+function hasAny(hay, needles = []) {
+  return needles.some((n) => hay.includes(n));
+}
+function stripHtmlToText(html = "") {
+  return String(html)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/li>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// ---------- Conversation memory (in-memory) ----------
+// NOTE: resets on deploy/restart; good enough for now.
+const SESS_TTL_MS = 30 * 60 * 1000; // 30 mins
+const SESS_MAX_TURNS = 16; // last 8 pairs
+const SESS = new Map(); // id -> { updatedAt, turns: [{role, content}], slots: {trackId, day} }
+
+function getSess(id) {
+  if (!id) return null;
+  const s = SESS.get(id);
+  if (!s) return null;
+  if (Date.now() - s.updatedAt > SESS_TTL_MS) {
+    SESS.delete(id);
+    return null;
+  }
+  return s;
+}
+
+function upsertSess(id) {
+  if (!id) return null;
+  let s = getSess(id);
+  if (!s) {
+    s = { updatedAt: Date.now(), turns: [], slots: {} };
+    SESS.set(id, s);
+  }
+  s.updatedAt = Date.now();
+  return s;
+}
+
+function pushTurn(sess, role, content) {
+  if (!sess) return;
+  sess.turns.push({ role, content });
+  if (sess.turns.length > SESS_MAX_TURNS) {
+    sess.turns = sess.turns.slice(sess.turns.length - SESS_MAX_TURNS);
+  }
+}
+
+function inferSessionId(req) {
+  // If frontend doesn’t send sessionId, we derive a "best effort" stable-ish id.
+  // Prefer x-forwarded-for (first IP) + UA.
+  const xf = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const ip = xf || req.socket.remoteAddress || "unknown";
+  const ua = String(req.headers["user-agent"] || "ua");
+  return sha1(`${ip}::${ua}`);
+}
+
+// ---------- Slot logic (track/day) ----------
+function detectTrackIdFromText(q = "") {
+  const s = normQ(q);
+  if (s.includes("mile end") || s.includes("mileend") || s.includes("london")) return "mile_end";
+  if (s.includes("gillingham") || s.includes("kent")) return "gillingham";
+  return null;
+}
+
+function extractDayFromText(q = "") {
+  const s = normQ(q);
+  const days = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
+  const hit = days.find((d) => s.includes(d));
+  return hit ? (hit.charAt(0).toUpperCase() + hit.slice(1)) : null;
+}
+
+// Only ask track/day/time when it actually matters (eligibility/booking/payment).
+function questionNeedsEligibility(q = "") {
+  const s = normQ(q);
+
+  // These topics DO need track/day because rules differ (Mile End ticket days, booking requests, deposits).
+  const eligibilityTopics = [
+    "use my tickets", "use tickets", "valid", "eligib", "can i use",
+    "book", "booking", "reserve", "availability", "slots",
+    "deposit", "pay", "payment", "48 hours", "whatsapp",
+    "mile end", "london track",
+  ];
+
+  // These do NOT need track/day/time (avoid rigid behaviour)
+  const generalTopics = [
+    "what's included", "whats included", "equipment", "helmet", "balaclava",
+    "how many laps", "laps per session", "session length", "duration",
+    "f1 simulator", "simulator", "refund", "expiry", "gift", "refer", "referral",
+    "tickets left", "redeemed", "pin", "dashboard",
+    "where", "location", "located", "postcode", "address", "tracks", "venues", "locations"
+  ];
+
+  if (hasAny(s, generalTopics)) return false;
+  if (hasAny(s, eligibilityTopics)) return true;
+  return false;
+}
+
+// ---------- Fast routes (return HTML instantly) ----------
+function buildTracksHtml(kb) {
+  const tracks = kb?.site?.tracks || [];
+  if (!Array.isArray(tracks) || !tracks.length) return null;
+
+  const names = tracks.map((t) => `${t.name} (${t.region})`).join(" and ");
+  return `We currently run tracks in <strong>${names}</strong>.`;
+}
+
+function fastRouteReply(query, kb, sess) {
+  const q = normQ(query);
+  if (!kb || !sess) return null;
+
+  // Update slots from this message
+  const tid = detectTrackIdFromText(query);
+  if (tid) sess.slots.trackId = tid;
+
+  const day = extractDayFromText(query);
+  if (day) sess.slots.day = day;
+
+  // 1) Track locations / "where is the track" → ALWAYS list both tracks (never default to Gillingham)
+  if (hasAny(q, ["where", "location", "located", "postcode", "address", "tracks", "venues", "locations"])) {
+    const tracksHtml = buildTracksHtml(kb);
+    if (tracksHtml) return `${tracksHtml}<br>Which one are you looking at?`;
+  }
+
+  // 2) Customer Dashboard / Ticket Checker
+  if (
+    hasAny(q, [
+      "dashboard", "pin", "gift", "gifting", "referral", "credits",
+      "tickets left", "redeemed", "tracking code", "my tickets",
+      "check tickets", "ticket balance", "ticket checker", "custdash"
+    ])
+  ) {
+    return `Manage tickets, gifting and referrals in the 
+<a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/cdashlogin.php">Customer Dashboard</a>.<br>
+For a quick check only, use the 
+<a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/custdash.php">Ticket Checker</a>.`;
+  }
+
+  // 3) Mile End explicit
+  if (hasAny(q, ["mile end", "mileend", "london track"])) {
+    const be = kb.site?.urls?.book_experience || "https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php";
+    return `Mile End is our <strong>London</strong> outdoor electric track.<br>
+• <strong>8 laps</strong> per session on a <strong>450 m</strong> floodlit track<br>
+• Minimum height: <strong>155 cm</strong><br>
+• Tickets valid: <strong>Mon / Tue / Wed / Sun</strong> (pre-book required)<br>
+<a href="${be}">Book Experience</a>`;
+  }
+
+  return null;
+}
+
+// ---------- KB → docs for embeddings ----------
 function flattenDocsFromKB(kb) {
   const d = [];
 
-  // Opening hours chunk (general)
+  // General
   d.push({
     id: "opening",
     text: `${kb.opening?.days || ""} Hours: ${kb.opening?.hours || ""}`.trim(),
     url: kb.site?.urls?.home,
   });
 
-  // Multi-track only (do NOT add legacy single-track chunks if tracks exist)
-  const tracks = Array.isArray(kb?.site?.tracks) ? kb.site.tracks : [];
-
+  // Multi-track
+  const tracks = kb.site?.tracks && Array.isArray(kb.site.tracks) ? kb.site.tracks : [];
   if (tracks.length) {
+    // High-signal overview chunk for "where are your tracks?"
     d.push({
       id: "tracks_overview",
       text:
         `Karting Central tracks: ` +
         tracks
-          .map((t) => `${t.name} (${t.region}) — ${t.type}${t.indoor ? " indoor" : " outdoor"}`)
+          .map((t) => `${t.name} (${t.region}) — ${t.indoor ? "indoor" : "outdoor"} ${t.type || "karting"}`)
           .join("; ") +
-        `. If the user is vague, ask “Which track and what day/time?”`,
+        `. If the user doesn’t specify a track/day, ask which track (and day if Mile End).`,
       url: kb.site?.urls?.home,
     });
 
+    // Per-track chunks
     for (const t of tracks) {
       const karts = t.karts || {};
       const req = t.requirements || {};
@@ -206,15 +281,14 @@ function flattenDocsFromKB(kb) {
           id: "mile_end_ticket_rules",
           text:
             `Mile End (London) ticket rules: minimum height 155 cm. ` +
-            `Karting Central tickets can be used on Monday, Tuesday, Wednesday, and Sunday only, and must be pre-booked.`,
+            `Tickets can be used Monday, Tuesday, Wednesday, and Sunday only; must pre-book.`,
           url: kb.site?.urls?.book_experience || kb.site?.urls?.home,
         });
-
         d.push({
           id: "mile_end_sessions",
           text:
             `Mile End sessions: 1 session is always 8 laps on a 450 m floodlit outdoor track. ` +
-            `3 sessions = 24 laps total; an hour booking window with roughly 30 minutes of track time.`,
+            `3 sessions = 24 laps total; hour booking window with roughly 30 minutes of track time.`,
           url: kb.site?.urls?.book_experience || kb.site?.urls?.home,
         });
       }
@@ -228,24 +302,6 @@ function flattenDocsFromKB(kb) {
         });
       }
     }
-  } else {
-    // legacy fallback only if no tracks array exists
-    if (kb.track_and_karts) {
-      d.push({
-        id: "track",
-        text: `Indoor: ${kb.track_and_karts.indoor}. Kart: ${kb.track_and_karts.kart_type}. Top speed up to ${kb.track_and_karts.top_speed_mph} mph. Max ${kb.track_and_karts.max_karts_on_track} karts.`,
-        url: kb.site?.urls?.home,
-      });
-    }
-    if (kb.requirements) {
-      d.push({
-        id: "requirements",
-        text: `Adult min height: ${kb.requirements.adult_min_height_cm} cm (5ft). Junior min height: ${kb.requirements.junior_min_height_cm} cm. Shoes count toward height: ${
-          kb.requirements.shoes_count_towards_height ? "yes" : "no"
-        }.`,
-        url: kb.site?.urls?.safety,
-      });
-    }
   }
 
   // Equipment
@@ -257,18 +313,10 @@ function flattenDocsFromKB(kb) {
     });
   }
 
-  // Sessions / deals (general)
-  if (kb.sessions) {
-    d.push({
-      id: "sessions",
-      text: `Per ticket: ${kb.sessions.per_ticket_includes}. Up to ${kb.sessions.laps_per_session_up_to} laps/session.`,
-      url: kb.site?.urls?.book_tickets,
-    });
-  }
-
+  // Deals (keep)
   d.push({
     id: "deals",
-    text: `Session 2 & 3 discounted (pre-book by phone). Session 3 tiers: 1–4 £12; 5–8 £11; 9–12 £10.`,
+    text: `Session 2 & 3 discounted. Session 3 tiers: 1–4 £12; 5–8 £11; 9–12 £10.`,
     url: kb.site?.urls?.book_tickets,
   });
 
@@ -278,13 +326,7 @@ function flattenDocsFromKB(kb) {
     url: kb.site?.urls?.terms,
   });
 
-  d.push({
-    id: "tracking",
-    text: `Tracking codes for managing tickets. Use Customer Dashboard for gifting and referrals; Ticket Checker is quick check only.`,
-    url: kb.site?.urls?.customer_dashboard,
-  });
-
-  // Fast answers as hint chunks
+  // Hint chunks from fast_answers (optional)
   for (const f of kb.fast_answers || []) {
     d.push({
       id: `hint_${f.intent}`,
@@ -359,25 +401,24 @@ async function fetchPrompt(force = false) {
 }
 
 function getSystemPrompt() {
+  // .md is the source of truth
   if (PROMPT_TEXT && PROMPT_TEXT.trim()) return PROMPT_TEXT;
+
+  // fallback
   return `
 You are the Karting Central website assistant.
 - Always use UK English and GBP (£).
-- Handle greetings and small talk naturally.
-- Use provided context for facts/links; if none is relevant, answer generally but never invent specific prices/hours/policies.
-- Be concise and friendly. Start with the direct answer, then 1–2 helpful bullets if needed.
-- Add a clear CTA with the correct path (Book Experience, Customer Dashboard, Safety, Events) only when relevant.
-- If a user mentions tickets or tracking codes, point to the Customer Dashboard link.
+- Be concise and helpful.
+- Use provided context; never invent prices/hours/policies.
+- Output HTML only with <a> links (no bare URLs).
 `;
 }
 
 // ---------- Promo lead capture ----------
 const LEADS_ROOT = path.join(process.cwd(), "leads");
-
 function ensureDir(p) {
   if (!existsSync(p)) mkdirSync(p, { recursive: true });
 }
-
 function ymdParts(d = new Date()) {
   const y = String(d.getFullYear());
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -393,7 +434,6 @@ app.post("/api/promo-lead", async (req, res) => {
     const nameOk = clean(name).length > 0;
     const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean(email));
     const phoneOk = /^[0-9\s+\-()]{7,}$/.test(clean(phone));
-
     if (!nameOk || !emailOk || !phoneOk) {
       return res.status(400).json({ ok: false, error: "Invalid name/email/phone." });
     }
@@ -431,8 +471,7 @@ app.post("/api/promo-lead", async (req, res) => {
       ].join(",") + "\n";
 
     if (!existsSync(csvPath)) {
-      const header = "ts,name,email,phone,source,ua,ip\n";
-      await fs.appendFile(csvPath, header, "utf8");
+      await fs.appendFile(csvPath, "ts,name,email,phone,source,ua,ip\n", "utf8");
     }
     await fs.appendFile(csvPath, csvLine, "utf8");
 
@@ -443,7 +482,7 @@ app.post("/api/promo-lead", async (req, res) => {
   }
 });
 
-// ---------- Chat route ----------
+// ---------- Chat route (conversation + retrieval) ----------
 app.post("/api/faq-response", async (req, res) => {
   const t0 = Date.now();
   try {
@@ -451,48 +490,89 @@ app.post("/api/faq-response", async (req, res) => {
     if (!query) return res.status(400).json({ error: "Missing 'query'." });
     if (!KB) return res.status(503).json({ error: "KB not loaded yet" });
 
-    // FAST path
-    const fast = fastRouteReply(query, KB);
-    if (fast) return res.json({ response: enforceGBP(fast), sources: [] });
+    // sessionId optional; if missing we derive one and return it
+    const sessionId = String(req.body?.sessionId || "") || inferSessionId(req);
+    const sess = upsertSess(sessionId);
 
-    // Deterministic routing header (prevents “default to Gillingham”)
-    const trackId = detectTrack(query);
-    const header = trackHeader(trackId, KB);
+    // FAST ROUTES (also updates slots)
+    const fast = fastRouteReply(query, KB, sess);
+    if (fast) {
+      const botHtml = enforceGBP(fast);
+      pushTurn(sess, "user", String(query));
+      pushTurn(sess, "assistant", stripHtmlToText(botHtml));
+      return res.json({ response: botHtml, sources: [], sessionId });
+    }
 
-    // Retrieval is guided by the header (better chunk selection)
-    const retrieved = await retrieve(`${header}\nUser: ${query}`, 5);
+    // Only ask track/day when it actually matters:
+    // - ask track for eligibility/booking requests
+    // - ask day ONLY for Mile End when needed
+    const needsElig = questionNeedsEligibility(query);
+    if (needsElig) {
+      const trackKnown = !!sess?.slots?.trackId;
+      const dayKnown = !!sess?.slots?.day;
+
+      if (!trackKnown) {
+        const botHtml =
+          `Which track are you looking at — <strong>Gillingham</strong> or <strong>Mile End (London)</strong>?<br>` +
+          `<a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php">Book Experience</a>`;
+        pushTurn(sess, "user", String(query));
+        pushTurn(sess, "assistant", stripHtmlToText(botHtml));
+        return res.json({ response: botHtml, sources: [], sessionId });
+      }
+
+      if (sess.slots.trackId === "mile_end" && !dayKnown) {
+        const botHtml =
+          `What day are you looking to race at <strong>Mile End</strong>?<br>` +
+          `Tickets are valid <strong>Mon / Tue / Wed / Sun</strong> (pre-book required).<br>` +
+          `<a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php">Book Experience</a>`;
+        pushTurn(sess, "user", String(query));
+        pushTurn(sess, "assistant", stripHtmlToText(botHtml));
+        return res.json({ response: botHtml, sources: [], sessionId });
+      }
+    }
+
+    // Conversation-aware retrieval query
+    const convoText = (sess?.turns || [])
+      .slice(-8)
+      .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`)
+      .join("\n");
+
+    const retrieved = await retrieve(`${convoText}\nUser: ${query}`, 5);
 
     const contextBlock = retrieved
       .map(
         (r, i) =>
-          `#${i + 1} [${r.v.id}] ${r.v.meta.text}${
-            r.v.meta.url ? ` (URL: ${r.v.meta.url})` : ""
-          }`
+          `#${i + 1} [${r.v.id}] ${r.v.meta.text}${r.v.meta.url ? ` (URL: ${r.v.meta.url})` : ""}`
       )
       .join("\n\n");
 
+    const historyMsgs = (sess?.turns || []).map((t) => ({
+      role: t.role,
+      content: t.content,
+    }));
+
     const messages = [
-      { role: "system", content: getSystemPrompt() }, // your .md is source of truth
+      { role: "system", content: getSystemPrompt() }, // .md is the prompt
+      ...historyMsgs,
       {
         role: "user",
-        content: `${header}
+        content: `User question: ${query}
 
-User question: ${query}
-
-Reference notes (optional, factual snippets):
+Reference notes (optional factual snippets):
 ${contextBlock || "(none)"}
 
 Rules:
-- If user didn’t specify a track/day and it matters, ask ONE question: “Which track and what day/time?”
-- Never default to Gillingham for “where/location/tracks”.
-- Return HTML only.`,
+- Continue the conversation using prior messages (do not treat each message as new).
+- Do NOT repeatedly ask for track/day/time unless eligibility/booking requires it.
+- If user asks where/locations/tracks, list BOTH: Gillingham (Kent) and Mile End (London).
+- Output valid HTML only. Use <a> links. Do not output Markdown. Do not invent policies/prices/hours.`,
       },
     ];
 
     const completion = await openai.chat.completions.create({
       model: CHAT_MODEL,
       messages,
-      temperature: 0.5,
+      temperature: 0.4,
       presence_penalty: 0.2,
       frequency_penalty: 0.2,
     });
@@ -501,8 +581,11 @@ Rules:
       enforceGBP(completion.choices?.[0]?.message?.content?.trim()) ||
       "Sorry, I couldn’t generate a reply.";
 
+    pushTurn(sess, "user", String(query));
+    pushTurn(sess, "assistant", stripHtmlToText(text));
+
     const sources = retrieved.map((r) => ({ id: r.v.id, url: r.v.meta.url }));
-    res.json({ response: text, sources });
+    res.json({ response: text, sources, sessionId });
 
     console.log("[chat] done in", Date.now() - t0, "ms");
   } catch (e) {
@@ -512,13 +595,9 @@ Rules:
 });
 
 // ---------- Status & reload ----------
-app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, ts: Date.now() });
-});
+app.get("/healthz", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 app.get("/kb-status", (_req, res) => res.json({ loaded: !!KB, chunks: VECTORS.length }));
-app.get("/prompt-status", (_req, res) => {
-  res.json({ hasPrompt: !!(PROMPT_TEXT && PROMPT_TEXT.trim()) });
-});
+app.get("/prompt-status", (_req, res) => res.json({ hasPrompt: !!(PROMPT_TEXT && PROMPT_TEXT.trim()) }));
 
 app.post("/kb-reload", async (_req, res) => {
   try {
@@ -540,10 +619,6 @@ app.post("/prompt-reload", async (_req, res) => {
   }
 });
 
-function sha1(s = "") {
-  return crypto.createHash("sha1").update(String(s)).digest("hex").slice(0, 10);
-}
-
 app.get("/debug-config", (_req, res) => {
   res.json({
     ok: true,
@@ -557,16 +632,17 @@ app.get("/debug-config", (_req, res) => {
     kbLastModified: lastModified,
     promptEtag,
     promptLastMod,
+    sessions: SESS.size,
   });
 });
 
+// ---------- Warmup ----------
 async function warmOpenAI() {
   try {
     await openai.embeddings.create({ model: EMB_MODEL, input: "warmup" });
   } catch (e) {
     console.warn("[warmup] embeddings:", e.message);
   }
-
   try {
     await openai.chat.completions.create({
       model: CHAT_MODEL,
@@ -597,21 +673,24 @@ async function warmup() {
 
 // ---------- Boot ----------
 const port = process.env.PORT || 10000;
+
 app.listen(port, async () => {
   console.log(`Listening on ${port}`);
 
   await warmup();
 
-  setInterval(
-    () => fetchKB(false).catch((e) => console.warn("KB refresh failed:", e.message)),
-    REFRESH_MS
-  );
-  setInterval(
-    () => fetchPrompt(false).catch((e) => console.warn("Prompt refresh failed:", e.message)),
-    REFRESH_MS
-  );
+  setInterval(() => {
+    // clean old sessions
+    const now = Date.now();
+    for (const [k, v] of SESS.entries()) {
+      if (now - (v?.updatedAt || 0) > SESS_TTL_MS) SESS.delete(k);
+    }
+  }, 5 * 60 * 1000);
 
-  // Self-ping to keep process hot (Render free tier may still sleep; external ping helps most)
+  setInterval(() => fetchKB(false).catch((e) => console.warn("KB refresh failed:", e.message)), REFRESH_MS);
+  setInterval(() => fetchPrompt(false).catch((e) => console.warn("Prompt refresh failed:", e.message)), REFRESH_MS);
+
+  // Self-ping keeps the node process warm, but Render free tier can still sleep without external ping.
   setInterval(() => {
     fetch(`http://127.0.0.1:${port}/healthz`).catch(() => {});
   }, 60 * 1000);
