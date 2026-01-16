@@ -128,7 +128,7 @@
     {
       "intent": "tickets_check",
       "keywords": ["tickets","how many tickets","my tickets","check tickets","ticket balance","available tickets","view my tickets","how much left","track my tickets"],
-      "answer": "🎟️ Got it! If you already have tickets, you can check them here: [Customer Dashboard](https://pos.kartingcentral.co.uk/home/download/pos2/pos2/custdash.php)"
+      "answer": "🎟️ You can manage tickets, gifting and referrals in the <a href=\"https://pos.kartingcentral.co.uk/home/download/pos2/pos2/cdashlogin.php\">Customer Dashboard</a>.<br>If you only need a quick check, use the <a href=\"https://pos.kartingcentral.co.uk/home/download/pos2/pos2/custdash.php\">Ticket Checker</a>."
     },
     {
       "intent": "tracking_code_prompt",
@@ -237,6 +237,7 @@
     }
   ]
 }
+
 
 
 
