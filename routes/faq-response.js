@@ -163,9 +163,23 @@ export async function faqResponseHandler(req, res) {
 
     // 2) retrieve from KB
     const retrieved = await retrieve(query, 5);
-    const context = retrieved.map((r, i) =>
-      `#${i + 1} [${r.v.id}] ${r.v.meta.text} (URL: ${r.v.meta.url})`
-    ).join("\n\n");
+
+const injected = [];
+if (looksLikeTrackOverviewQuery(query)) {
+  const t = buildTracksOverview(KB);
+  if (t) injected.push(`#0 [tracks_overview_injected] ${t}`);
+}
+
+const contextBlock = [
+  ...injected,
+  ...retrieved.map(
+    (r, i) =>
+      `#${i + 1} [${r.v.id}] ${r.v.meta.text}${
+        r.v.meta.url ? ` (URL: ${r.v.meta.url})` : ""
+      }`
+  ),
+].join("\n\n");
+
 
     // 3) ask model
     const messages = [
@@ -178,3 +192,4 @@ export async function faqResponseHandler(req, res) {
 
     const resp = await openai.chat.completions.create({
       model: "gpt-4o-mini
+
