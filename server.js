@@ -335,6 +335,105 @@ function renderTicketCheckerHtml({ code, found, record, filePath }) {
 // ---------------------------
 // Chat router
 // ---------------------------
+// =========================
+// Bundles / Race Day / Corporate canned flows (HTML)
+// =========================
+const BUNDLE_PACKS = [
+  { qty: 4,  price: 80,   validity: "6 months",  name: "Duo Inception Pack" },
+  { qty: 8,  price: 160,  validity: "6 months",  name: "Spin Shield Pack" },
+  { qty: 12, price: 240,  validity: "6 months",  name: "Target Tracker Pack" },
+  { qty: 20, price: 400,  validity: "1 year",    name: "Sky Seeker Pack" },
+  { qty: 32, price: 640,  validity: "1 year",    name: "Speed Token Pack" },
+  { qty: 40, price: 800,  validity: "18 months", name: "Phase Drift Pack" },
+  { qty: 52, price: 1040, validity: "18 months", name: "Aqua Rush Pack" },
+  { qty: 60, price: 1200, validity: "2 years",   name: "Storm Pulse Pack" },
+  { qty: 72, price: 1440, validity: "2 years",   name: "Nova Core Pack" },
+];
+
+function renderBundlesHtml() {
+  const rows = BUNDLE_PACKS.map(p => {
+    const ppt = p.qty ? Math.round(p.price / p.qty) : 0;
+    return `<tr>
+      <td style="padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.10)"><strong>${escapeHtml(p.name)}</strong><br><span style="opacity:.85">x${p.qty} tickets</span></td>
+      <td style="padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.10);text-align:right"><strong>£${p.price}</strong><br><span style="opacity:.85">£${ppt}/ticket</span></td>
+      <td style="padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.10);text-align:right"><span style="opacity:.9">${escapeHtml(p.validity)}</span></td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div>
+      <strong>Ticket bundles</strong><br>
+      You can buy a pack and share tickets across friends &amp; family (one buyer can cover the whole group). Tickets can be used across multiple visits until expiry.<br><br>
+
+      <div style="overflow:auto;border:1px solid rgba(255,255,255,.12);border-radius:12px">
+        <table style="width:100%;border-collapse:collapse;min-width:520px">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:10px;border-bottom:1px solid rgba(255,255,255,.14)">Pack</th>
+              <th style="text-align:right;padding:10px;border-bottom:1px solid rgba(255,255,255,.14)">Price</th>
+              <th style="text-align:right;padding:10px;border-bottom:1px solid rgba(255,255,255,.14)">Validity</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div><br>
+
+      Each ticket includes <a href="https://www.kartingcentral.co.uk/session-info">one full session</a> (gear included). To use Karting Central tickets for an hour slot, Session 2 &amp; 3 must be pre-booked at the same time.<br><br>
+
+      Buy / book using your tracking code: <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php">Book Experience</a><br>
+      Manage gifting / sharing / PIN: <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/cdashlogin.php">Customer Dashboard</a><br><br>
+
+      Already have a pack? Paste your <strong>ticket code</strong> here and I’ll open the in-chat ticket checker.
+    </div>
+  `.trim();
+}
+
+function renderRaceDayHtml() {
+  return `
+    <div>
+      <strong>Open Race Sessions (Race Day)</strong><br>
+      Race Day is <strong>3 sessions</strong> (about <strong>1 hour on-site</strong> with short breaks) and is <strong>£29 per person</strong>.<br>
+      Each ticket covers <a href="https://www.kartingcentral.co.uk/session-info">one full session</a> — Session 2 &amp; 3 must be pre-booked together to secure the hour slot and multi-session pricing.<br><br>
+
+      <strong>Next step:</strong> choose track + date/time on <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php">Book Experience</a>.<br>
+      If you already have tickets, paste your <strong>ticket code</strong> here first and I’ll check what you have remaining.
+    </div>
+  `.trim();
+}
+
+function renderCorporateHtml() {
+  return `
+    <div>
+      <strong>Corporate / Private Hire — 4-Race Grand Prix</strong><br>
+      Corporate GP is <strong>£52 pp</strong> and includes food + room hire, plus private hire booking structure.<br><br>
+
+      <strong>How checkout works (new flow):</strong><br>
+      • <strong>No tracking code:</strong> you pay a <strong>£5 per driver deposit</strong> <em>and</em> a discounted ticket bundle at <strong>£5 per ticket</strong> (bundle size is auto-matched to your driver count).<br>
+      • <strong>Tracking code entered &amp; valid:</strong> deposit + bundle add-on are skipped and you pay <strong>£52 × drivers</strong> via checkout.<br><br>
+
+      Corporate bookings must be at least <strong>48 hours</strong> in advance for online deposit flows.<br><br>
+
+      Start here: <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php">Book Experience</a><br>
+      Manage tickets / gifting / referrals: <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/cdashlogin.php">Customer Dashboard</a><br><br>
+
+      If you have an existing code, paste your <strong>ticket code</strong> into this chat and I’ll check it.
+    </div>
+  `.trim();
+}
+
+function looksLikeBundleIntent(text) {
+  const t = (text || "").toLowerCase();
+  return /\b(bundle|bundles|pack|package|packages|buy\s+tickets|purchase\s+tickets|ticket\s+bundles|voucher\s+pack|voucher\s+bundle)\b/i.test(t);
+}
+function looksLikeRaceDayIntent(text) {
+  const t = (text || "").toLowerCase();
+  return /\b(race\s*day|open\s*race|open\s*racing|open\s*session|open\s*sessions|book\s*a\s*session)\b/i.test(t);
+}
+function looksLikeCorporateIntent(text) {
+  const t = (text || "").toLowerCase();
+  return /\b(corporate|private\s*hire|grand\s*prix|team\s*building|company\s*event)\b/i.test(t);
+}
+
 async function routeChat({ message, context = {} }) {
   const text = String(message ?? '').trim();
   const candidate = extractTrackingCandidate(text);
@@ -357,7 +456,31 @@ async function routeChat({ message, context = {} }) {
     };
   }
 
-  // Otherwise: FAQ / assistant response
+
+  // Routing: bundles / race day / corporate (new bundles page logic)
+  if (looksLikeCorporateIntent(text)) {
+    return { route: 'corporate', responseHtml: renderCorporateHtml(), data: {} };
+  }
+  if (looksLikeRaceDayIntent(text)) {
+    return { route: 'race_day', responseHtml: renderRaceDayHtml(), data: {} };
+  }
+  if (looksLikeBundleIntent(text)) {
+    return { route: 'bundles', responseHtml: renderBundlesHtml(), data: {} };
+  }
+
+  
+  // Routing: bundles / race day / corporate (new bundles page logic)
+  if (looksLikeCorporateIntent(text)) {
+    return { route: 'corporate', responseHtml: renderCorporateHtml(), data: {} };
+  }
+  if (looksLikeRaceDayIntent(text)) {
+    return { route: 'race_day', responseHtml: renderRaceDayHtml(), data: {} };
+  }
+  if (looksLikeBundleIntent(text)) {
+    return { route: 'bundles', responseHtml: renderBundlesHtml(), data: {} };
+  }
+
+// Otherwise: FAQ / assistant response
   const faqContext = await retrieveRelevantFaq(text, 4);
   const instr = await readTextIfExists(INSTR_PATH);
 
