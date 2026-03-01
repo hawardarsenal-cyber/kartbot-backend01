@@ -1,393 +1,430 @@
-// server.js — GPT + remote KB with external instructions + promo leads
-import "dotenv/config";
-import express from "express";
-import cors from "cors";
-import OpenAI from "openai";
-import fs from "fs/promises";
-import { existsSync, mkdirSync } from "fs";
-import path from "path";
+// KartingCentral Chatbot Backend (patched router build)
+// - Adds routing for tracking codes (in-chat ticket checker)
+// - Ensures HTML-only output
+// - Keeps existing /api/faq-response for compatibility
 
-import createTrackingRouter from "./routes/tracking.js";
+require('dotenv').config();
+
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
+const fsp = fs.promises;
+
+const OpenAI = require('openai');
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
-app.use(
-  cors({
-    origin: [
-      "https://pos.kartingcentral.co.uk",
-      "https://www.kartingcentral.co.uk",
-      "http://localhost:3000",
-    ],
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+app.use(cors());
+app.use(express.json({ limit: '1mb' }));
 
-// Tracking code lookup (mirrors the existing PHP tracking-code system).
-// Looks up codes in ../logs and ../splits (submission_*.json).
-app.use("/api", createTrackingRouter({ baseDir: path.resolve(process.cwd(), "..") }));
+// ---------------------------
+// Config
+// ---------------------------
+const PORT = process.env.PORT || 3001;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-// ---------- OpenAI ----------
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const CHAT_MODEL = "gpt-4o-mini";
-const EMB_MODEL = "text-embedding-3-small";
+// Knowledge sources (MD)
+const FAQ_PATH = process.env.KC_FAQ_PATH || path.join(__dirname, 'FAQ.md');
+const INSTR_PATH = process.env.KC_INSTRUCTIONS_PATH || path.join(__dirname, 'BOT_INSTRUCTIONS.md');
 
-// ---------- Remote KB ----------
-const KB_URL = process.env.KB_URL;
-const PROMPT_URL = process.env.PROMPT_URL; // external Markdown instructions
-const REFRESH_MS = 5 * 60 * 1000; // 5 minutes
+// Ticket / tracking record search paths (relative to repo root by default)
+// You can override with env KC_TRACKING_ROOT.
+const DEFAULT_TRACKING_ROOT = process.env.KC_TRACKING_ROOT || path.resolve(__dirname, '..', '..');
+const TRACKING_SEARCH_FOLDERS = (process.env.KC_TRACKING_FOLDERS || 'logs,splits,tpr/data').split(',').map(s => s.trim()).filter(Boolean);
 
-let KB = null;
-let DOCS = [];
-let VECTORS = [];
-let etag = null,
-  lastModified = null;
+// ---------------------------
+// OpenAI
+// ---------------------------
+if (!process.env.OPENAI_API_KEY) {
+  console.warn('[WARN] OPENAI_API_KEY is not set. /api/chat will fail until configured.');
+}
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-let PROMPT_TEXT = null;
-let promptEtag = null,
-  promptLastMod = null;
+// ---------------------------
+// Utilities
+// ---------------------------
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
-// ---------- Utils ----------
-const enforceGBP = (t) => (t || "").replace(/\$/g, "£");
+function stripCodeFences(s) {
+  return String(s ?? '').replace(/```[\s\S]*?```/g, (m) => {
+    // keep inner content if it's already HTML-ish; otherwise drop fences
+    const inner = m.replace(/^```[a-zA-Z0-9_-]*\n?/, '').replace(/```$/, '');
+    return inner;
+  });
+}
 
-function cosine(a, b) {
-  let dot = 0,
-    na = 0,
-    nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i],
-      y = b[i];
-    dot += x * y;
-    na += x * x;
-    nb += y * y;
+function enforceHtmlOnly(s) {
+  // Goal: always return valid HTML (no Markdown).
+  let out = stripCodeFences(String(s ?? '')).trim();
+
+  // If model returned Markdown-style links, try a very small conversion:
+  // [Label](url) -> <a href="url">Label</a>
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
+
+  // Remove stray markdown bullets into <br> (keep simple)
+  // Leading "- " or "• " lines -> "• ...<br>"
+  out = out
+    .split(/\r?\n/)
+    .map(line => line.replace(/^\s*[-*]\s+/,'• '))
+    .join('\n');
+
+  // If it doesn't look like HTML, wrap it.
+  const looksLikeHtml = /^\s*<\w[\s\S]*>\s*$/.test(out);
+  if (!looksLikeHtml) {
+    // Convert double newlines to paragraph breaks
+    const parts = out.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+    if (parts.length === 0) return '<div></div>';
+    const html = parts.map(p => `<p>${escapeHtml(p).replace(/\n/g,'<br>')}</p>`).join('');
+    return `<div>${html}</div>`;
   }
-  const denom = (Math.sqrt(na) * Math.sqrt(nb)) || 1;
-  return dot / denom;
+
+  // Still ensure we don't output markdown headers accidentally
+  out = out.replace(/^\s*#+\s*/gm, '');
+  return out;
 }
 
-function flattenDocsFromKB(kb) {
-  const d = [];
-  d.push({
-    id: "opening",
-    text: `${kb.opening.days} Hours: ${kb.opening.hours}`,
-    url: kb.site.urls.home,
-  });
-  d.push({
-    id: "track",
-    text: `Indoor: ${kb.track_and_karts.indoor}. Kart: ${kb.track_and_karts.kart_type}. Top speed up to ${kb.track_and_karts.top_speed_mph} mph. Max ${kb.track_and_karts.max_karts_on_track} karts.`,
-    url: kb.site.urls.home,
-  });
-  d.push({
-    id: "requirements",
-    text: `Adult min height: ${kb.requirements.adult_min_height_cm} cm (5ft). Junior min height: ${kb.requirements.junior_min_height_cm} cm. Shoes count toward height: ${
-      kb.requirements.shoes_count_towards_height ? "yes" : "no"
-    }.`,
-    url: kb.site.urls.safety,
-  });
-  d.push({
-    id: "equipment",
-    text: `Included: ${kb.equipment.included.join(", ")}.`,
-    url: kb.site.urls.safety,
-  });
-  d.push({
-    id: "sessions",
-    text: `Per ticket: ${kb.sessions.per_ticket_includes}. Up to ${kb.sessions.laps_per_session_up_to} laps/session.`,
-    url: kb.site.urls.book_tickets,
-  });
-  if (kb.sessions?.duration_guidance) {
-    d.push({
-      id: "duration",
-      text: `Duration guide: 1 ticket ≈ ~1 hour; 2 tickets ≈ ~2 hours on-site.`,
-      url: kb.site.urls.book_tickets,
-    });
+function normalizeCodeInput(raw) {
+  let s = String(raw ?? '').trim().toUpperCase();
+  s = s.replace(/[^A-Z0-9\-]/g, '');
+
+  // AA00000000 -> AA00-00-00-00
+  const m1 = s.match(/^([A-Z]{2})(\d{8})$/);
+  if (m1) {
+    const digits = m1[2];
+    return `${m1[1]}${digits.slice(0,2)}-${digits.slice(2,4)}-${digits.slice(4,6)}-${digits.slice(6,8)}`;
   }
-  d.push({
-    id: "deals",
-    text: `Session 2 & 3 discounted (pre-book by phone). Session 3 tiers: 1–4 £12; 5–8 £11; 9–12 £10.`,
-    url: kb.site.urls.book_tickets,
-  });
-  d.push({
-    id: "promos",
-    text: `Promotions do not apply on Saturdays.`,
-    url: kb.site.urls.terms,
-  });
-  d.push({
-    id: "f1",
-    text: `F1 simulator at Gillingham. 50% off with Karting Central tickets.`,
-    url: kb.site.urls.home,
-  });
-  d.push({
-    id: "tracking",
-    text: `Tracking codes for managing tickets. Gifting available via Customer Dashboard.`,
-    url: kb.site.urls.customer_dashboard,
-  });
-  for (const f of kb.fast_answers || []) {
-    d.push({
-      id: `hint_${f.intent}`,
-      text: `Hint: ${f.answer}`,
-      url: kb.site.urls.home,
-    });
+
+  // AA00-00-00-00 or AA00000000 (strip and reformat)
+  const stripped = s.replace(/-/g, '');
+  const m2 = stripped.match(/^([A-Z]{2})(\d{8})$/);
+  if (m2) {
+    const digits = m2[2];
+    return `${m2[1]}${digits.slice(0,2)}-${digits.slice(2,4)}-${digits.slice(4,6)}-${digits.slice(6,8)}`;
   }
-  return d;
+
+  return s;
 }
 
-async function rebuildEmbeddings() {
-  if (!KB) return;
-  DOCS = flattenDocsFromKB(KB);
-  const resp = await openai.embeddings.create({
-    model: EMB_MODEL,
-    input: DOCS.map((d) => d.text),
-  });
-  VECTORS = resp.data.map((e, i) => ({
-    id: DOCS[i].id,
-    embedding: e.embedding,
-    meta: DOCS[i],
-  }));
-  console.log(`Embedded ${VECTORS.length} KB chunks.`);
+function looksLikeTrackingCode(text) {
+  const t = String(text ?? '').trim();
+
+  // Common formats seen in this project:
+  // - Voucher/pack codes like rd12-010-070126-01 (prefix + numbers + date + sequence)
+  // - Corporate codes like AA00-00-00-00
+  const re1 = /\b([a-z]{1,4}\d{1,3})-(\d{2,3})-(\d{6})-(\d{2})\b/i;
+  const re2 = /\b([A-Z]{2}\d{2}-\d{2}-\d{2}-\d{2})\b/;
+
+  return re1.test(t) || re2.test(normalizeCodeInput(t));
 }
 
-async function retrieve(query, k = 5) {
-  if (!VECTORS.length) return [];
-  const q = await openai.embeddings.create({ model: EMB_MODEL, input: query });
-  const qEmb = q.data[0].embedding;
-  return VECTORS
-    .map((v) => ({ v, score: cosine(qEmb, v.embedding) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k);
+function extractTrackingCandidate(text) {
+  const t = String(text ?? '').trim();
+  const m = t.match(/\b([a-z]{1,4}\d{1,3}-\d{2,3}-\d{6}-\d{2})\b/i);
+  if (m) return m[1];
+  const m2 = t.match(/\b([A-Z]{2}\d{2}-\d{2}-\d{2}-\d{2})\b/);
+  if (m2) return m2[1];
+
+  // last resort: if entire message looks like a code
+  if (looksLikeTrackingCode(t)) return t;
+  return '';
 }
 
-// ---------- KB fetchers ----------
-async function fetchKB(force = false) {
-  if (!KB_URL) throw new Error("KB_URL not set");
-  const headers = {};
-  if (!force) {
-    if (etag) headers["If-None-Match"] = etag;
-    if (lastModified) headers["If-Modified-Since"] = lastModified;
-  }
-  const res = await fetch(KB_URL, { headers });
-  if (res.status === 304) return false;
-  if (!res.ok) throw new Error(`KB fetch failed: ${res.status}`);
-  const json = await res.json();
-  KB = json;
-  etag = res.headers.get("etag") || etag;
-  lastModified = res.headers.get("last-modified") || lastModified;
-  console.log(`KB loaded (${etag || "no-etag"})`);
-  await rebuildEmbeddings();
-  return true;
-}
-
-async function fetchPrompt(force = false) {
-  if (!PROMPT_URL) return false;
-  const headers = {};
-  if (!force) {
-    if (promptEtag) headers["If-None-Match"] = promptEtag;
-    if (promptLastMod) headers["If-Modified-Since"] = promptLastMod;
-  }
-  const res = await fetch(PROMPT_URL, { headers });
-  if (res.status === 304) return false;
-  if (!res.ok) throw new Error(`Prompt fetch failed: ${res.status}`);
-  PROMPT_TEXT = await res.text();
-  promptEtag = res.headers.get("etag") || promptEtag;
-  promptLastMod = res.headers.get("last-modified") || promptLastMod;
-  console.log(`Prompt loaded from ${PROMPT_URL}`);
-  return true;
-}
-
-function getSystemPrompt() {
-  if (PROMPT_TEXT && PROMPT_TEXT.trim()) return PROMPT_TEXT;
-  return `
-You are the Karting Central website assistant.
-- Always use UK English and GBP (£).
-- Handle greetings and small talk naturally.
-- Use provided context for facts/links; if none is relevant, answer generally but never invent specific prices/hours/policies.
-- Be concise and friendly. Start with the direct answer, then 1–2 helpful bullets if needed.
-- Add a clear CTA with the correct path (Book Experience, Customer Dashboard, Safety, Events) only when relevant.
-- If a user mentions tickets or tracking codes, point to the Customer Dashboard link.
-`;
-}
-
-// ---------- Promo lead capture ----------
-const LEADS_ROOT = path.join(process.cwd(), "leads");
-
-function ensureDir(p) {
-  if (!existsSync(p)) mkdirSync(p, { recursive: true });
-}
-
-function ymdParts(d = new Date()) {
-  const y = String(d.getFullYear());
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return { y, m, day };
-}
-
-app.post("/api/promo-lead", async (req, res) => {
+async function readTextIfExists(filePath) {
   try {
-    const { name, email, phone, ts, source } = req.body || {};
-    const clean = (s) => (String(s || "").trim());
+    return await fsp.readFile(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+}
 
-    const nameOk = clean(name).length > 0;
-    const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean(email));
-    const phoneOk = /^[0-9\s+\-()]{7,}$/.test(clean(phone));
+// ---------------------------
+// Simple retrieval: chunk FAQ.md and pick top matches
+// ---------------------------
+function tokenize(s) {
+  return String(s ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
 
-    if (!nameOk || !emailOk || !phoneOk) {
-      return res.status(400).json({ ok: false, error: "Invalid name/email/phone." });
+function scoreOverlap(queryTokens, chunkTokens) {
+  if (!queryTokens.length || !chunkTokens.length) return 0;
+  const set = new Set(chunkTokens);
+  let hit = 0;
+  for (const w of queryTokens) if (set.has(w)) hit++;
+  return hit;
+}
+
+function chunkText(text, maxChars = 1200) {
+  const paras = String(text ?? '').split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+  const chunks = [];
+  let buf = '';
+  for (const p of paras) {
+    if ((buf + '\n\n' + p).length > maxChars) {
+      if (buf.trim()) chunks.push(buf.trim());
+      buf = p;
+    } else {
+      buf = buf ? (buf + '\n\n' + p) : p;
     }
-
-    const when = ts && !isNaN(Date.parse(ts)) ? new Date(ts) : new Date();
-    const { y, m, day } = ymdParts(when);
-
-    const dirMonth = path.join(LEADS_ROOT, `${y}-${m}`);
-    ensureDir(dirMonth);
-
-    const jsonlPath = path.join(dirMonth, `${y}-${m}-${day}.jsonl`);
-    const csvPath   = path.join(dirMonth, `${y}-${m}-${day}.csv`);
-
-    // Build record
-    const record = {
-      name: clean(name),
-      email: clean(email),
-      phone: clean(phone),
-      ts: when.toISOString(),
-      source: clean(source) || "unknown",
-      ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || "",
-      ua: req.headers["user-agent"] || "",
-    };
-
-    // Append JSONL
-    await fs.appendFile(jsonlPath, JSON.stringify(record) + "\n", "utf8");
-
-    // Append CSV (header only if new)
-    const csvLine = [
-      record.ts,
-      `"${record.name.replace(/"/g, '""')}"`,
-      record.email,
-      record.phone,
-      record.source,
-      `"${String(record.ua).replace(/"/g, '""')}"`,
-      `"${String(record.ip).replace(/"/g, '""')}"`,
-    ].join(",") + "\n";
-
-    if (!existsSync(csvPath)) {
-      const header = "ts,name,email,phone,source,ua,ip\n";
-      await fs.appendFile(csvPath, header, "utf8");
-    }
-    await fs.appendFile(csvPath, csvLine, "utf8");
-
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("[promo-lead] error:", e);
-    res.status(500).json({ ok: false, error: "Failed to save lead." });
   }
-});
+  if (buf.trim()) chunks.push(buf.trim());
+  return chunks;
+}
 
-// ---------- Chat route ----------
-app.post("/api/faq-response", async (req, res) => {
-  const t0 = Date.now();
-  try {
-    const { query } = req.body ?? {};
-    if (!query) return res.status(400).json({ error: "Missing 'query'." });
-    if (!KB) return res.status(503).json({ error: "KB not loaded yet" });
+async function retrieveRelevantFaq(query, k = 4) {
+  const faqText = await readTextIfExists(FAQ_PATH);
+  if (!faqText) return '';
 
-    const retrieved = await retrieve(query, 5);
-    const contextBlock = retrieved
-      .map(
-        (r, i) =>
-          `#${i + 1} [${r.v.id}] ${r.v.meta.text}${
-            r.v.meta.url ? ` (URL: ${r.v.meta.url})` : ""
-          }`
-      )
-      .join("\n\n");
+  const chunks = chunkText(faqText, 1200);
+  const qTok = tokenize(query);
 
-    const messages = [
-      { role: "system", content: getSystemPrompt() },
-      {
-        role: "user",
-        content: `User question: ${query}
+  const scored = chunks
+    .map((c) => ({ c, s: scoreOverlap(qTok, tokenize(c)) }))
+    .sort((a, b) => b.s - a.s)
+    .slice(0, k)
+    .filter(x => x.s > 0)
+    .map(x => x.c);
 
-Here are optional reference notes:
-${contextBlock || "(none)"}
+  return scored.join('\n\n---\n\n');
+}
 
-Use them if helpful; otherwise answer generally. Never invent prices/hours/policies.`,
-      },
-    ];
-
-    const completion = await openai.chat.completions.create({
-      model: CHAT_MODEL,
-      messages,
-      temperature: 0.5,
-      presence_penalty: 0.2,
-      frequency_penalty: 0.2,
-    });
-
-    const text =
-      enforceGBP(completion.choices?.[0]?.message?.content?.trim()) ||
-      "Sorry, I couldn’t generate a reply.";
-    const sources = retrieved.map((r) => ({ id: r.v.id, url: r.v.meta.url }));
-    res.json({ response: text, sources });
-    console.log("[chat] done in", Date.now() - t0, "ms");
-  } catch (e) {
-    console.error("[chat] error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// ---------- Status & reload ----------
-app.get("/healthz", (_, res) => res.send("ok"));
-app.get("/kb-status", (_, res) => res.json({ loaded: !!KB, chunks: VECTORS.length }));
-app.get("/prompt-status", (_, res) => res.json({ hasPrompt: !!PROMPT_TEXT }));
-
-app.post("/kb-reload", async (_req, res) => {
-  try {
-    const changed = await fetchKB(true);
-    res.json({ ok: true, changed, loaded: !!KB, chunks: VECTORS.length });
-  } catch (e) {
-    console.error("KB reload error:", e);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-app.post("/prompt-reload", async (_req, res) => {
-  try {
-    const changed = await fetchPrompt(true);
-    res.json({ ok: true, changed, hasPrompt: !!PROMPT_TEXT });
-  } catch (e) {
-    console.error("Prompt reload error:", e);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// ---------- Boot ----------
-const port = process.env.PORT || 10000;
-app.listen(port, async () => {
-  console.log(`Listening on ${port}`);
-
-  const tryInit = async () => {
+// ---------------------------
+// Tracking lookup (JSON scan)
+// ---------------------------
+async function listJsonFilesRecursively(rootDir, maxFiles = 5000) {
+  const out = [];
+  async function walk(dir) {
+    if (out.length >= maxFiles) return;
+    let entries = [];
     try {
-      await fetchKB(true);
-    } catch (e) {
-      console.error("Initial KB load failed:", e.message);
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
     }
+    for (const ent of entries) {
+      if (out.length >= maxFiles) return;
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        // skip node_modules and vendor-ish
+        if (ent.name === 'node_modules' || ent.name === '.git') continue;
+        await walk(p);
+      } else if (ent.isFile() && ent.name.endsWith('.json')) {
+        out.push(p);
+      }
+    }
+  }
+  await walk(rootDir);
+  return out;
+}
+
+function candidateCodesFromRecord(obj) {
+  const c = [];
+  if (!obj || typeof obj !== 'object') return c;
+
+  const keys = ['track_code', 'tracking_code', 'paidFullCode', 'freeFullCode', 'code', 'ticket_code', 'tracking'];
+  for (const k of keys) {
+    if (obj[k]) c.push(String(obj[k]));
+  }
+  return c;
+}
+
+async function findTrackingRecord(trackCodeRaw) {
+  const norm = normalizeCodeInput(trackCodeRaw);
+
+  for (const folder of TRACKING_SEARCH_FOLDERS) {
+    const folderPath = path.join(DEFAULT_TRACKING_ROOT, folder);
+
+    // Fast path: if it doesn't exist, continue
     try {
-      await fetchPrompt(true);
-    } catch (e) {
-      console.error("Initial prompt load failed:", e.message);
+      const st = await fsp.stat(folderPath);
+      if (!st.isDirectory()) continue;
+    } catch {
+      continue;
     }
+
+    const jsonFiles = await listJsonFilesRecursively(folderPath, 3000);
+
+    for (const filePath of jsonFiles) {
+      let data;
+      try {
+        const raw = await fsp.readFile(filePath, 'utf8');
+        data = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+
+      // Support: object or array of objects
+      const records = Array.isArray(data) ? data : [data];
+      for (const rec of records) {
+        const candidates = candidateCodesFromRecord(rec);
+        for (const stored of candidates) {
+          if (normalizeCodeInput(stored) === norm) {
+            return { record: rec, filePath };
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function renderTicketCheckerHtml({ code, found, record, filePath }) {
+  const codeNice = escapeHtml(normalizeCodeInput(code));
+
+  if (!found) {
+    return `
+<div>
+  <p><strong>Got it — I can help check that code.</strong><br>
+  I couldn’t find a match instantly in our local records for <strong>${codeNice}</strong>.</p>
+
+  <p>Please double-check the characters (you can paste it again), or tell me the <strong>purchase email</strong> used at checkout / on the promo stand.</p>
+
+  <p>If you’d rather do this on the booking page, use:<br>
+  <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php">Book Experience</a></p>
+</div>`;
+  }
+
+  // Heuristic fields (don’t assume they exist)
+  const buyerEmail = record?.buyer_email || record?.buyerEmail || record?.email || '';
+  const buyerName  = record?.buyer_name || record?.buyerName || '';
+  const qty        = record?.qty ?? record?.quantity ?? record?.tickets ?? '';
+  const status     = record?.status ?? '';
+  const createdAt  = record?.created_at || record?.createdAt || '';
+  const redeemed   = record?.redeemed ?? record?.used ?? record?.tickets_used ?? '';
+  const remaining  = record?.remaining ?? record?.tickets_remaining ?? '';
+
+  const rows = [];
+  const pushRow = (k, v) => {
+    if (v === '' || v === null || typeof v === 'undefined') return;
+    rows.push(`<tr><td style="padding:6px 10px;border:1px solid rgba(255,255,255,.12);"><strong>${escapeHtml(k)}</strong></td><td style="padding:6px 10px;border:1px solid rgba(255,255,255,.12);">${escapeHtml(v)}</td></tr>`);
   };
 
-  await tryInit();
+  pushRow('Ticket code', normalizeCodeInput(code));
+  pushRow('Name', buyerName);
+  pushRow('Email', buyerEmail);
+  pushRow('Tickets / Qty', String(qty));
+  pushRow('Redeemed', String(redeemed));
+  pushRow('Remaining', String(remaining));
+  pushRow('Status', String(status));
+  pushRow('Created', String(createdAt));
 
-  setInterval(
-    () =>
-      fetchKB(false).catch((e) =>
-        console.warn("KB refresh failed:", e.message)
-      ),
-    REFRESH_MS
-  );
-  setInterval(
-    () =>
-      fetchPrompt(false).catch((e) =>
-        console.warn("Prompt refresh failed:", e.message)
-      ),
-    REFRESH_MS
-  );
+  const fileHint = filePath ? `<p style="opacity:.75;font-size:.9em;">(Record source: ${escapeHtml(path.relative(DEFAULT_TRACKING_ROOT, filePath))})</p>` : '';
+
+  return `
+<div>
+  <p><strong>✅ Code found:</strong> <strong>${codeNice}</strong></p>
+  <table style="border-collapse:collapse;width:100%;max-width:720px;">
+    <tbody>
+      ${rows.join('') || `<tr><td style="padding:6px 10px;border:1px solid rgba(255,255,255,.12);"><strong>Ticket code</strong></td><td style="padding:6px 10px;border:1px solid rgba(255,255,255,.12);">${codeNice}</td></tr>`}
+    </tbody>
+  </table>
+  ${fileHint}
+  <p>If you want to <strong>book</strong> using this code, go to:<br>
+  <a href="https://pos.kartingcentral.co.uk/home/download/pos2/pos2/book_experience.php">Book Experience</a></p>
+</div>`;
+}
+
+// ---------------------------
+// Chat router
+// ---------------------------
+async function routeChat({ message, context = {} }) {
+  const text = String(message ?? '').trim();
+  const candidate = extractTrackingCandidate(text);
+
+  // Routing: tracking code in message => in-chat ticket checker
+  if (candidate && looksLikeTrackingCode(candidate)) {
+    const found = await findTrackingRecord(candidate);
+    return {
+      route: 'ticket_checker',
+      responseHtml: renderTicketCheckerHtml({
+        code: candidate,
+        found: !!found,
+        record: found?.record,
+        filePath: found?.filePath,
+      }),
+      data: {
+        code: normalizeCodeInput(candidate),
+        found: !!found,
+      },
+    };
+  }
+
+  // Otherwise: FAQ / assistant response
+  const faqContext = await retrieveRelevantFaq(text, 4);
+  const instr = await readTextIfExists(INSTR_PATH);
+
+  const system = `You are Karting Central’s customer support bot.\n\n` +
+    `IMPORTANT OUTPUT RULE: Return VALID HTML ONLY. Do not output Markdown.\n` +
+    `Use <br> for short line breaks. Keep paragraphs short.\n` +
+    `Use proper anchors for ALL links: <a href=\"URL\">Label</a>. Never print bare URLs.\n\n` +
+    (instr ? `\n---\nBOT INSTRUCTIONS (authoritative):\n${instr}\n` : '');
+
+  const user = `User message:\n${text}\n\n` +
+    (faqContext ? `Relevant FAQ context (scan & use as source of truth):\n${faqContext}\n` : '');
+
+  const completion = await client.chat.completions.create({
+    model: OPENAI_MODEL,
+    temperature: 0.2,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+  });
+
+  const raw = completion?.choices?.[0]?.message?.content ?? '';
+  const html = enforceHtmlOnly(raw);
+
+  return {
+    route: 'answer',
+    responseHtml: html,
+  };
+}
+
+// ---------------------------
+// Routes
+// ---------------------------
+app.get('/health', (req, res) => res.json({ ok: true }));
+
+// New unified route
+app.post('/api/chat', async (req, res) => {
+  try {
+    const message = req.body?.message ?? req.body?.prompt ?? '';
+    if (!String(message).trim()) {
+      return res.status(400).json({ error: 'Missing message' });
+    }
+
+    const result = await routeChat({ message, context: req.body?.context || {} });
+    return res.json(result);
+  } catch (err) {
+    console.error('[/api/chat] error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Backwards-compatible endpoint
+app.post('/api/faq-response', async (req, res) => {
+  try {
+    const prompt = req.body?.prompt || '';
+    const result = await routeChat({ message: prompt, context: req.body?.context || {} });
+    return res.json({ answer: result.responseHtml, route: result.route, data: result.data || null });
+  } catch (err) {
+    console.error('[/api/faq-response] error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`KC chatbot backend listening on :${PORT}`);
+  console.log(`FAQ_PATH: ${FAQ_PATH}`);
+  console.log(`INSTR_PATH: ${INSTR_PATH}`);
+  console.log(`TRACKING_ROOT: ${DEFAULT_TRACKING_ROOT}`);
+  console.log(`TRACKING_FOLDERS: ${TRACKING_SEARCH_FOLDERS.join(', ')}`);
 });
